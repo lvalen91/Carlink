@@ -1,0 +1,140 @@
+plugins {
+    id "com.android.application"
+    id "kotlin-android"
+    id "dev.flutter.flutter-gradle-plugin"
+}
+
+// Apply simplified project configuration after plugins
+apply from: '../../../project_config.gradle'
+
+// Configure Java toolchain for Java 21 support
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+// Task to automatically rename packages based on applicationId
+task generatePackageStructure {
+    doLast {
+        def templateDir = file('src/main/kotlin/TEMPLATE_PACKAGE')
+        def templateFile = new File(templateDir, 'MainActivity.kt')
+        
+        if (templateFile.exists()) {
+            // Create target package directory structure
+            def packagePath = myApplicationId.replace('.', '/')
+            def targetDir = file("src/main/kotlin/${packagePath}")
+            def targetFile = new File(targetDir, 'MainActivity.kt')
+            
+            // Create directory structure
+            targetDir.mkdirs()
+            
+            // Read template content and replace package name
+            def content = templateFile.text.replace('TEMPLATE_PACKAGE', myApplicationId)
+            
+            // Write to target location
+            targetFile.text = content
+            
+            println "Generated MainActivity at: ${targetFile.absolutePath}"
+            println "Package: ${myApplicationId}"
+        }
+    }
+}
+
+// Clean up any existing package directories that don't match current applicationId
+task cleanOldPackages {
+    doLast {
+        def kotlinDir = file('src/main/kotlin')
+        if (kotlinDir.exists()) {
+            def currentPackagePath = myApplicationId.replace('.', '/')
+            
+            // Remove all old package directories except template and current one
+            kotlinDir.listFiles().each { topLevelDir ->
+                if (topLevelDir.isDirectory() && topLevelDir.name != 'TEMPLATE_PACKAGE') {
+                    if (!currentPackagePath.startsWith(topLevelDir.name + '/')) {
+                        println "Cleaning old package directory: ${topLevelDir.name}"
+                        topLevelDir.deleteDir()
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Run package generation before compilation
+preBuild.dependsOn cleanOldPackages, generatePackageStructure
+
+def localProperties = new Properties()
+def localPropertiesFile = rootProject.file('local.properties')
+if (localPropertiesFile.exists()) {
+    localPropertiesFile.withReader('UTF-8') { reader ->
+        localProperties.load(reader)
+    }
+}
+
+def flutterVersionCode = localProperties.getProperty('flutter.versionCode')
+if (flutterVersionCode == null) {
+    flutterVersionCode = '1'
+}
+
+def flutterVersionName = localProperties.getProperty('flutter.versionName')
+if (flutterVersionName == null) {
+    flutterVersionName = '1.0'
+}
+
+android {
+    namespace myApplicationId
+    compileSdkVersion myCompileSdk
+    ndkVersion "27.0.12077973"
+
+    compileOptions {
+        sourceCompatibility myJavaVersion
+        targetCompatibility myJavaVersion
+        // Enable core library desugaring for modern Java APIs
+        coreLibraryDesugaringEnabled true
+    }
+
+    kotlinOptions {
+        jvmTarget = myJvmTarget
+        // Enable more advanced Kotlin/Java 21 features
+        freeCompilerArgs += ["-opt-in=kotlin.RequiresOptIn"]
+    }
+
+    sourceSets {
+        main.java.srcDirs += 'src/main/kotlin'
+    }
+
+    defaultConfig {
+        // Application ID is now centrally configured in project_config.gradle
+        applicationId myApplicationId
+        // SDK versions are now centrally configured
+        minSdkVersion myMinSdk
+        targetSdkVersion myTargetSdk
+        // Use centralized version or Flutter's local properties
+        versionCode flutterVersionCode?.toInteger() ?: myVersionCode
+        versionName flutterVersionName ?: myVersionName
+        
+        // Manifest placeholders for dynamic values
+        manifestPlaceholders = [
+            applicationName: myApplicationName
+        ]
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            shrinkResources false
+            // Use debug signing for now
+            signingConfig signingConfigs.debug
+        }
+    }
+}
+
+flutter {
+    source '../..'
+}
+
+dependencies {
+    // Core library desugaring for Java 21 APIs on older Android versions
+    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.0.4'
+}

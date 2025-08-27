@@ -1,0 +1,4 @@
+- Do not modifty project dart files.
+- Do not modify CPC200-CCPA initilization and keep alive, heartbeat, code/logic.
+- Utilize CPC200-CCPA_AI_Ingest.md
+- mindsdk 31

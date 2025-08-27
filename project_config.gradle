@@ -1,0 +1,32 @@
+ext {
+    // Project Configuration - Centralized build settings following Gradle best practices
+    // Based on 2025 Android development standards and naming conventions
+    
+    // Application Configuration - For example/demo app
+    myApplicationId = "com.test.fudge"
+    myApplicationName = "Fudge"
+    
+    // App Version Configuration
+    myVersionCode = 3
+    myVersionName = "0.0.2"
+    
+    // Android SDK Configuration - Target Android API levels
+    myCompileSdk = 35
+    myTargetSdk = 34
+    myMinSdk = 31
+    
+    // Library Configuration - For the carlink library module
+    myLibraryGroup = "com.carlink"
+    myLibraryVersion = "1.0.0"
+    myLibraryMinSdk = 31
+    
+    // Build Tools Configuration - Versions for build system and language tools
+    myKotlinVersion = "2.2.0"
+    // Note: This controls the Android Gradle Plugin (AGP) version, not Gradle wrapper version
+    // Gradle wrapper version is controlled by gradle/wrapper/gradle-wrapper.properties
+    myGradleVersion = "8.12.1"  // Actually AGP version - naming kept for compatibility
+    
+    // Java/JVM Configuration - Language level and target compatibility  
+    myJavaVersion = JavaVersion.VERSION_21
+    myJvmTarget = "21"
+}

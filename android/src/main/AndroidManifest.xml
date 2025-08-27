@@ -1,0 +1,19 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    
+    <!-- PLUGIN-LEVEL AAOS DISTRACTION OPTIMIZATION -->
+    <uses-permission android:name="android.car.permission.CAR_DRIVING_STATE" />
+    <uses-permission android:name="android.car.permission.CAR_UX_RESTRICTIONS_CONFIGURATION" />
+    
+    <!-- Automotive feature declarations for plugin -->
+    <uses-feature
+        android:name="android.hardware.type.automotive"
+        android:required="false" />
+    
+    <application>
+        <!-- PLUGIN: MARK AS DISTRACTION OPTIMIZED -->
+        <meta-data
+            android:name="com.android.automotive.application.DISTRACTION_OPTIMIZED"
+            android:value="true" />
+    </application>
+    
+</manifest>

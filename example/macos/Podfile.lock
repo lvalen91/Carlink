@@ -1,0 +1,22 @@
+PODS:
+  - carplay (0.0.1):
+    - FlutterMacOS
+  - FlutterMacOS (1.0.0)
+
+DEPENDENCIES:
+  - carplay (from `Flutter/ephemeral/.symlinks/plugins/carplay/macos`)
+  - FlutterMacOS (from `Flutter/ephemeral`)
+
+EXTERNAL SOURCES:
+  carplay:
+    :path: Flutter/ephemeral/.symlinks/plugins/carplay/macos
+  FlutterMacOS:
+    :path: Flutter/ephemeral
+
+SPEC CHECKSUMS:
+  carplay: 26180d2fe8b7c1d32028c27eb0ee3a914221b42c
+  FlutterMacOS: 8f6f14fa908a6fb3fba0cd85dbd81ec4b251fb24
+
+PODFILE CHECKSUM: f0c21717cb7ee9112f915044c74bfceb5b12e02a
+
+COCOAPODS: 1.14.3
