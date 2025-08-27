@@ -21,7 +21,7 @@ It is not currently processed/rendered.
 Built upon https://github.com/lvalen91/abu-Carplay
 
 Based on Work from:
-https://github.com/electric-monk/pycarplay
-https://github.com/rhysmorgan134/node-CarPlay
-https://github.com/f-io/pi-carplay
-https://github.com/abuharsky/carplay
+- https://github.com/electric-monk/pycarplay
+- https://github.com/rhysmorgan134/node-CarPlay
+- https://github.com/f-io/pi-carplay
+- https://github.com/abuharsky/carplay
