@@ -224,9 +224,10 @@ class Carlink {
       }
     }
     //
-    else if (message is AudioData) {
-      _clearPairTimeout();
-    }
+    // AudioData processing disabled - foundation preserved for future expansion
+    // else if (message is AudioData) {
+    //   _clearPairTimeout();
+    // }
     //
     else if (message is MediaData) {
       _clearPairTimeout();

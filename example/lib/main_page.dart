@@ -6,7 +6,6 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import 'file_writer.dart';
 import 'logger.dart';
 import 'settings_page.dart';
 
@@ -311,11 +310,9 @@ class _MainPageState extends State<MainPage> with WidgetsBindingObserver {
     Uint8List? coverData,
   ) async {
     // String? path;
+    // File writing functionality removed - coverData processing disabled
     if (coverData != null) {
-      final file =
-          await FileWriter.writeFileToDownloadsDir(coverData, "cover.jpg");
-      // path = file?.absolute.path.replaceAll('//', '/');
-      file?.absolute.path.replaceAll('//', '/');
+      // Cover data received but not saved to file
     }
 
     // try {

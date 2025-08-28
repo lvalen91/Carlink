@@ -1,4 +1,5 @@
 - Do not modifty project dart files.
 - Do not modify CPC200-CCPA initilization and keep alive, heartbeat, code/logic.
-- Utilize CPC200-CCPA_AI_Ingest.md
+- Ignore macOS and Linux for this project. Android Only
 - mindsdk 31
+- Use CPC200_CCPA_for_AI_Ingest.md as reference for CPC200-CCPA capabilities
