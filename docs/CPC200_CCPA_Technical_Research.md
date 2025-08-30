@@ -1,7 +1,7 @@
 # Carlinkit CPC200-CCPA Complete Technical Reference
 
-**Version:** 1.0  
-**Date:** 2025-01-22  
+**Version:** 1.1  
+**Date:** 2025-08-30  
 **Purpose:** Comprehensive technical documentation for the Carlinkit CPC200-CCPA adapter, covering hardware specifications, USB protocols, implementation patterns, and integration guidance.
 
 ---
@@ -40,8 +40,8 @@ The Carlinkit CPC200-CCPA is a sophisticated USB dongle that serves as a bridge 
 
 ### Technical Specifications
 - **USB Interface**: VID 0x1314, PIDs 0x1520/0x1521
-- **CPU**: Atmel AT91SAM9260 
-- **WiFi Module**: Broadcom BCM4358 (5150-5250MHz, 5725-5850MHz / 2412-2472MHz)
+- **CPU**: iMX6UL-14x14 (MCIMX6Y2CVM08AB), Branded as a fake Atmel AT91SAM9260  
+- **WiFi Module**: Broadcom BCM4358 (5150-5250MHz, 5725-5850MHz / 2412-2472MHz) or Realtek RTL8822CS in some models.
 - **Bluetooth**: Version 4.0 with 3dBi built-in FPC antenna
 - **Power**: 5V±0.2V 1.0A input, 0.75W consumption
 - **Certifications**: CE/FCC/NCC/KCC/TELEC, MFi 3959/3989
@@ -2738,12 +2738,6 @@ if (document.readyState === 'loading') {
 - **Certification Numbers**: MFi 3959/3989 for CPC200-CCPA
 - **Security**: Hardware-based authentication and encryption
 
-#### Technical Requirements
-- **Video**: H.264 baseline profile, up to 1920×1080@30fps
-- **Audio**: Multiple streams, 44.1kHz/48kHz, 16-bit PCM
-- **Input**: Multi-touch, rotary encoder, button support
-- **Network**: WiFi 802.11a/b/g/n/ac, Bluetooth 4.0+
-
 ### Android Auto Requirements
 
 #### AOAv2 Protocol Compliance
@@ -2751,12 +2745,6 @@ if (document.readyState === 'loading') {
 - **Authentication**: USB accessory mode detection
 - **Power**: Must provide 500mA@5V for device charging
 - **API Level**: Requires Android 6.0+ (API 23) minimum
-
-#### Technical Requirements
-- **Video**: H.264, up to 1920×1080@60fps
-- **Audio**: AAC/PCM, 48kHz, 16-bit (note: AOAv2 audio deprecated in Android 8.0)
-- **Input**: Touch, voice, steering wheel controls
-- **Network**: WiFi or USB tethering
 
 ### USB Standards Compliance
 
@@ -2800,6 +2788,37 @@ if (document.readyState === 'loading') {
 - **Personal Information**: Handle phone book, messages with care
 - **Data Retention**: Implement appropriate data lifecycle policies
 
+### Maximum Confirmed CPC200-CCPA Capabilities:
+#### Using Pi-Carplay to test various configurations
+
+  - Resolution: Up to 4096×2160 (4K Cinema)
+  - Frame Rate: Up to 60fps
+  - Maximum Pixels/Second: 531,441,600
+  - Width Hard Limit: 5120 pixels (failures occur beyond this)
+  - Encoding: HEVC and H.264 support
+
+#### Specific Test Results:
+
+  SUCCESSFUL:
+  - 3840×2160@30fps HEVC (85Mbps video)
+  - 3440×1440@60fps HEVC (92Mbps video)
+  - 4096×2160@60fps HEVC (110Mbps video) - Apple's maximum HEVC spec
+
+  FAILED:
+  - 5120×1440@30fps HEVC - exceeded hardware video decoder width constraint
+  
+#### Audio Capabilities:
+
+  - Simultaneous Performance: Unlimited during video processing
+  - Quality: No degradation observed
+  - Pipeline: Separate from video processing
+
+#### Bandwidth Usage:
+
+  - USB 2.0 Theoretical: 480 Mbps
+  - Practical Maximum: 320 Mbps
+  - Maximum Test Usage: 111.4 Mbps (35% utilization)
+  - Remaining Headroom: 65% bandwidth unused
 ---
 
 ## Appendices
