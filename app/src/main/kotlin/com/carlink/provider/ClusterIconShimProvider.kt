@@ -30,6 +30,13 @@ import java.util.LinkedHashMap
  * - query(): return contentUri + aspectRatio metadata
  * - openFile(): serve cached PNG via pipe (with optional scaling)
  *
+ * Second role (rev 156, EXPERIMENTAL): the same authority also serves the app's OWN maneuver
+ * icons at `content://<authority>/stable/<content-hash>` from [StableIconRegistry]. Those
+ * URIs are what ManeuverMapper puts into a `CarIcon` (TYPE_URI) instead of a bitmap, so the
+ * host assigns a content-stable cache id, loads the PNG from here ONCE per unique icon, and
+ * then hits its own insert()/query() cache on every subsequent updateTrip. See
+ * [com.carlink.navigation.ClusterIconDelivery] for the gate and the kill switch.
+ *
  * Security posture: [AndroidManifest.xml] declares this provider exported=true with
  * grantUriPermissions=true because Templates Host runs in a different UID. The
  * authority string is not secret, but cached content is limited to maneuver-icon
@@ -50,6 +57,9 @@ class ClusterIconShimProvider : ContentProvider() {
         // Bounded to cap memory: maneuver-icon diversity per trip is small, so 20
         // entries is enough to cover a full drive without re-encoding repeats.
         // At ~10-40 KiB per PNG this caps peak footprint at ~200-800 KiB.
+        // NOTE (rev 156): with BITMAP CarIcons the host's id is random per updateTrip, so this
+        // cache churned one insert + one LRU eviction per second (Potato 05-30: 2,164 inserts);
+        // the "small diversity" assumption only holds with resource or stable-URI icons.
         private const val MAX_CACHE_SIZE = 20
     }
 
@@ -147,6 +157,17 @@ class ClusterIconShimProvider : ContentProvider() {
         uri: Uri,
         mode: String,
     ): ParcelFileDescriptor? {
+        // Check for scaling parameters (GM's ClusterImageManager asks for ?w=100&h=100;
+        // Templates Host's own IconCompat.loadDrawable fetch of a /stable/ URI sends none).
+        val targetW = uri.getQueryParameter("w")?.toIntOrNull()
+        val targetH = uri.getQueryParameter("h")?.toIntOrNull()
+
+        // App-published stable icon (rev 156): content://<authority>/stable/<content-hash>.
+        val segments = uri.pathSegments
+        if (segments.size == 2 && segments[0] == StableIconRegistry.PATH_SEGMENT) {
+            return openStableIcon(segments[1], targetW, targetH)
+        }
+
         val cacheKey = uri.lastPathSegment
         if (cacheKey == null) {
             Logger.w("openFile() with null lastPathSegment", tag = TAG)
@@ -159,32 +180,76 @@ class ClusterIconShimProvider : ContentProvider() {
             return null
         }
 
-        // Check for scaling parameters
-        val targetW = uri.getQueryParameter("w")?.toIntOrNull()
-        val targetH = uri.getQueryParameter("h")?.toIntOrNull()
-        val outputData =
-            if (targetW != null && targetH != null && targetW > 0 && targetH > 0) {
-                scaleIcon(data, targetW, targetH)
-            } else {
-                data
-            }
-
+        val outputData = maybeScale(data, targetW, targetH)
         Logger.d("openFile() serving $cacheKey (${outputData.size} bytes, scale=${targetW}x$targetH)", tag = TAG)
+        return pipeOut(cacheKey, outputData)
+    }
 
+    /**
+     * Serve one of the app's own stable-URI maneuver icons. Never returns null: a key that is
+     * missing from [StableIconRegistry] (evicted, or a URI from a previous install) is answered
+     * with the 1x1 transparent placeholder — see the registry KDoc for why a failed load is
+     * worse than a blank glyph. Logged at INFO (visible in logcat on debug builds, and in the
+     * file log under NORMAL/DEBUG/CLUSTER_MEDIA presets) so a VM/radio capture can confirm
+     * that the host fetched each unique icon exactly once.
+     */
+    private fun openStableIcon(
+        key: String,
+        targetW: Int?,
+        targetH: Int?,
+    ): ParcelFileDescriptor {
+        val registered = StableIconRegistry.get(key)
+        val data =
+            if (registered != null) {
+                registered
+            } else {
+                Logger.w(
+                    "openFile() stable icon $key NOT registered (registry size=${StableIconRegistry.size()}) — serving placeholder",
+                    tag = TAG,
+                )
+                StableIconRegistry.placeholderPng
+            }
+        val outputData = maybeScale(data, targetW, targetH)
+        Logger.i(
+            "openFile() serving stable icon $key (${outputData.size} bytes, requested=${targetW}x$targetH" +
+                "${if (registered == null) ", PLACEHOLDER" else ""})",
+            tag = TAG,
+        )
+        return pipeOut("stable/$key", outputData)
+    }
+
+    private fun maybeScale(
+        data: ByteArray,
+        targetW: Int?,
+        targetH: Int?,
+    ): ByteArray =
+        if (targetW != null && targetH != null && targetW > 0 && targetH > 0) {
+            scaleIcon(data, targetW, targetH)
+        } else {
+            data
+        }
+
+    private fun pipeOut(
+        label: String,
+        outputData: ByteArray,
+    ): ParcelFileDescriptor {
         val pipe = ParcelFileDescriptor.createPipe()
         val readEnd = pipe[0]
         val writeEnd = pipe[1]
 
         // One thread per openFile call (not pooled). Simpler than ThreadPoolExecutor
         // lifecycle for a provider whose caller cadence is a handful per minute during
-        // nav. Swap for a pooled executor if this becomes a hot path.
+        // nav. Swap for a pooled executor if this becomes a hot path. (With bitmap CarIcons
+        // the cadence was actually once per second — Potato 05-30 — because GM re-fetched a
+        // fresh random-id URI every tick; the rev 156 stable-URI path restores the
+        // handful-per-minute cadence this comment assumed.)
         Thread({
             try {
                 ParcelFileDescriptor.AutoCloseOutputStream(writeEnd).use { os ->
                     os.write(outputData)
                 }
             } catch (e: Exception) {
-                Logger.e("openFile() pipe write error for $cacheKey: ${e.message}", tag = TAG)
+                Logger.e("openFile() pipe write error for $label: ${e.message}", tag = TAG)
             }
         }, "IconShim-Pipe").start()
 

@@ -30,38 +30,41 @@
         android:protectionLevel="signature|privileged" />
     <uses-permission android:name="com.carlink.permission.NAVI_VIDEO_STREAM" />
 
-    <!-- USB Host. required=false on purpose: the CPC200 adapter needs USB host at
-         runtime, but GM AAOS (gm/gminfo37) does NOT advertise android.hardware.usb.host
-         in its Play device profile, so required=true filtered the truck out of the AAOS
-         track. required=false stops Play filtering on it; the UsbManager API + the
-         usb_device_filter below are unaffected and still work at runtime. -->
+    <!-- USB Host. The CPC200 adapter needs USB host at runtime. required=true is
+         safe on the Phones/Tablets track (rev 153): Play lists the gminfo37 radio as
+         compatible there with this set. The earlier required=false was a workaround
+         for the Automotive track, which never listed the truck at all and was dropped. -->
     <uses-feature
         android:name="android.hardware.usb.host"
-        android:required="false" />
+        android:required="true" />
 
     <!-- Optional Features -->
     <uses-feature
         android:name="android.hardware.microphone"
-        android:required="false" />
-    <!-- AAOS-only distribution per developer.android.com/training/cars/distribute:
-         media apps on the Android Automotive OS Play track must declare
-         android.hardware.type.automotive as required=true (or unset). Setting it false
-         would let the same APK install on phones/tablets where the AAOS-specific
-         services have no host. -->
+        android:required="true" />
+    <!-- required=false on purpose (rev 153). required=true routes the bundle to the
+         Automotive OS Play track, and that track never listed the gminfo37 radio as
+         compatible for open or closed beta. false drops the app onto the Phones/Tablets
+         track, which does list the truck; Internal Testing runs there. Side effect:
+         the same bundle can install on phones/tablets where the AAOS services have no
+         host. See documents/revisions.txt 147-153. -->
     <uses-feature
         android:name="android.hardware.type.automotive"
-        android:required="true" />
+        android:required="false" />
     <!-- Car App Library Templates Host. The cluster CarAppService is bound and
-         surface-provisioned by com.google.android.apps.automotive.templates.host
-         (live-verified on the AAOS emulator: renderer_service holds an open
-         ConnectionRecord to CarlinkClusterService). Declared required per Play AAOS
-         review; every certified AAOS build — including GM — ships the Templates Host. -->
+         surface-provisioned by com.google.android.apps.automotive.templates.host.
+         gminfo37 firmware declares android.software.car.templates_host on-device
+         (Y181 dump, product/etc/permissions/com.google.android.car.templateshost.xml).
+         required=true keeps the truck listed on the Phones/Tablets track (rev 153);
+         the sparse Device Catalog profile only bit on the abandoned Automotive track.
+         Cluster integration is optional anyway (CarlinkClusterService ships
+         android:enabled="false"); NavigationStateManager probes the host at runtime. -->
     <uses-feature
         android:name="android.software.car.templates_host"
         android:required="true" />
     <uses-feature
         android:name="android.hardware.location.gps"
-        android:required="false" />
+        android:required="true" />
 
     <application
         android:allowBackup="true"

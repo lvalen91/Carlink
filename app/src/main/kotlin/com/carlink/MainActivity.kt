@@ -509,22 +509,35 @@ class MainActivity : ComponentActivity() {
         // Apply video resolution preference (must be before ViewArea/SafeArea construction)
         // AUTO = use detected usable dimensions, otherwise use user-selected resolution
         val userSelectedResolution = !userConfig.videoResolution.isAuto
-        val (configWidth, configHeight) =
+        val (requestedWidth, requestedHeight) =
             if (userConfig.videoResolution.isAuto) {
-                // Some decoders cannot configure the full display size even though their
-                // advertised capabilities say they can (see DecoderCompat).
-                com.carlink.platform.DecoderCompat.adjust(evenWidth, evenHeight)
+                Pair(evenWidth, evenHeight)
             } else {
                 // User selected a specific resolution - use it for adapter config
                 // Note: Surface size remains the actual display size for touch normalization
                 Pair(userConfig.videoResolution.width, userConfig.videoResolution.height)
             }
+        // Clamp to a size the local H.264 decoder can actually start. Identity on any device
+        // whose decoder handles the requested size (gminfo37, emulator); see DecoderCompat for
+        // the vendor-driver case where advertised capabilities exceed the real limit. Applies
+        // to explicit picks too, since the picklist offers the raw display size.
+        val (configWidth, configHeight) =
+            com.carlink.platform.DecoderCompat.adjust(
+                requestedWidth,
+                requestedHeight,
+                platformInfo.hardwareH264DecoderName,
+            )
+        val decoderClamped = configWidth != requestedWidth || configHeight != requestedHeight
+        // Config intentionally differs from the surface when the user pinned a resolution OR
+        // the decoder clamp shrank it. Both need inset scaling and both must suppress the
+        // surface-vs-codec divergence WARN in CarlinkManager.
+        val configPinned = userSelectedResolution || decoderClamped
 
         // Build binary ViewArea/SafeArea data using the configured resolution.
         // ViewArea/SafeArea must match OPEN message dimensions (safeArea ⊆ viewArea ⊆ display).
         val viewAreaData = buildViewAreaData(configWidth, configHeight)
         val safeAreaData =
-            if (userSelectedResolution) {
+            if (configPinned) {
                 // Scale cutout insets from display coordinates to custom resolution coordinates.
                 // Linear scaling assumes cutouts are rectangular window-edge margins (true on
                 // AAOS displays we've seen). Non-uniform X/Y scaling is OK here because cutout
@@ -561,8 +574,8 @@ class MainActivity : ComponentActivity() {
                 height = configHeight,
                 fps = userConfig.fps.fps,
                 dpi = dpi,
-                // Mark if user explicitly selected a resolution (non-AUTO)
-                userSelectedResolution = userSelectedResolution,
+                // Config deliberately != surface: user pick (non-AUTO) or decoder clamp
+                userSelectedResolution = configPinned,
                 icon120Data = icon120,
                 icon180Data = icon180,
                 icon256Data = icon256,
@@ -591,7 +604,11 @@ class MainActivity : ComponentActivity() {
                 "DisplayMode: ${currentDisplayMode.name}",
             tag = "MAIN",
         )
-        logInfo("Display config: ${config.width}x${config.height}@${config.fps}fps, ${config.dpi}dpi", tag = "MAIN")
+        logInfo(
+            "Display config: ${config.width}x${config.height}@${config.fps}fps, ${config.dpi}dpi" +
+                (if (decoderClamped) " (decoder-clamped from ${requestedWidth}x$requestedHeight)" else ""),
+            tag = "MAIN",
+        )
         logInfo(
             "Icons loaded: $iconsLoaded " +
                 "(120: ${icon120?.size ?: 0}B, 180: ${icon180?.size ?: 0}B, " +
@@ -993,8 +1010,8 @@ class MainActivity : ComponentActivity() {
         NavigationStateManager.clear()
         val am = getSystemService(ActivityManager::class.java)
         for (appTask in am.appTasks) {
-            if (appTask.taskInfo.baseActivity?.className == "androidx.car.app.activity.CarAppActivity") {
-                logInfo("[CLUSTER] Finishing CarAppActivity task (taskId=${appTask.taskInfo.taskId})", tag = "MAIN")
+            if (appTask.taskInfo?.baseActivity?.className == "androidx.car.app.activity.CarAppActivity") {
+                logInfo("[CLUSTER] Finishing CarAppActivity task (taskId=${appTask.taskInfo?.taskId})", tag = "MAIN")
                 appTask.finishAndRemoveTask()
                 break
             }

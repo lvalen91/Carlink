@@ -166,6 +166,18 @@ public class H264Renderer {
     private volatile int sqTail = 0;  // written by feeder thread only
     private final ConcurrentLinkedQueue<StagedFrame> framePool = new ConcurrentLinkedQueue<>();
     private StagedFrame writeFrame;                                // USB thread only
+    // Backing store for the staging pool. Allocated ONCE per renderer on the first
+    // initStaging() and reused across every stopInternal()/start() cycle (reset(), resume(),
+    // watchdog reset, display-mode reinit). Previously each start() allocated a fresh
+    // 6 x 2 MB = 12 MB set and stopStaging() dropped the old one: 12 MB of large-object
+    // garbage plus 12 MB of fresh allocation at exactly the moment the decoder restarts, on
+    // a no-swap, LMK-pressured head unit. Slot size and count are unchanged (rev 142 sizing).
+    private StagedFrame[] stagingFrames;
+    // Bumped on every initStaging(). The feeder captures it at start and stops looping and
+    // returning frames once it goes stale, so a feeder that outlived stopStaging()'s 1 s join
+    // can never hand a frame back into the NEXT session's pool (which would alias a buffer
+    // now that the pool is reused instead of reallocated).
+    private volatile int stagingGeneration = 0;
     private volatile Thread feederThread;
     private volatile Thread renderThread;
     private final AtomicLong stagingDropCount = new AtomicLong(0);
@@ -181,6 +193,19 @@ public class H264Renderer {
     // Sync codec timeouts (microseconds)
     private static final long DEQUEUE_INPUT_TIMEOUT_US = 100_000L;   // 100ms
     private static final long DEQUEUE_OUTPUT_TIMEOUT_US = 100_000L;  // 100ms
+
+    // Render-thread resilience (rev 156, surface-freeze option D). A sync-mode
+    // mCodec.flush() — flushCodec() on settings-overlay close — cancels the render thread's
+    // pending dequeueOutputBuffer with an IllegalStateException. The loop used to `break` on
+    // that and the H264-Render thread exited for good: the codec kept accepting input, the
+    // output ports filled, the feeder then stalled on dequeueInputBuffer, and nothing drew
+    // until the watchdog's zombie reset (Potato captures Z2–Z5, 2.2 s to 46.9 s frozen).
+    // Now a dequeue error only backs the thread off briefly; it keeps looping while the
+    // renderer is running and its pool generation is current. The backoff is a plain
+    // parkNanos — no lock is held while sleeping, and 50 ms keeps a persistently faulting
+    // codec from spinning hot until the watchdog resets it.
+    private static final long RENDER_ERROR_BACKOFF_NS = 50_000_000L;   // 50ms
+    private static final long RENDER_ERROR_LOG_EVERY = 100;            // log 1st, then every 100th
 
     public H264Renderer(int width, int height, Surface surface, LogCallback logCallback,
                         AppExecutors executors, String preferredDecoderName) {
@@ -382,6 +407,15 @@ public class H264Renderer {
      *
      * After flush, the codec needs a new IDR to resume decoding. The caller should
      * request a keyframe from the adapter (for CarPlay) or wait for natural IDR (AA).
+     *
+     * Rev 156 note (behavior deliberately unchanged here): flush()+start() is the ASYNC
+     * idiom left over from before the rev 98 sync rewrite. In sync mode the framework
+     * returns the codec to STARTED on its own when the flush completes
+     * (MediaCodec kWhatFlushCompleted, non-async branch), so the start() below throws
+     * IllegalStateException("start failed") every time and is logged as "Codec flush
+     * failed" — the codec itself stays usable. The flush also cancels the render thread's
+     * blocked dequeueOutputBuffer; {@link #renderLoop} now survives that instead of
+     * exiting (see RENDER_ERROR_BACKOFF_NS), which is what makes this path recover.
      */
     public void flushCodec() {
         synchronized (codecLock) {
@@ -563,10 +597,21 @@ public class H264Renderer {
         stagingOverwriteDetected = false;
         lastReactiveKeyframeTimeNs = 0;
 
-        // Allocate 6 StagedFrames: 1 -> writeFrame, 5 -> framePool
-        writeFrame = new StagedFrame(STAGED_FRAME_CAPACITY);
+        // 6 StagedFrames: 1 -> writeFrame, 5 -> framePool. Allocated on the first start only;
+        // later starts reuse the same buffers (contents are overwritten by the next feedDirect
+        // arraycopy, and the queue/pool indices were reset above).
+        if (stagingFrames == null) {
+            stagingFrames = new StagedFrame[STAGED_FRAME_COUNT];
+            for (int i = 0; i < STAGED_FRAME_COUNT; i++) {
+                stagingFrames[i] = new StagedFrame(STAGED_FRAME_CAPACITY);
+            }
+            log("Staging pool allocated: " + STAGED_FRAME_COUNT + " x " + (STAGED_FRAME_CAPACITY / 1024)
+                    + "KB (reused across codec restarts)");
+        }
+        stagingGeneration++;
+        writeFrame = stagingFrames[0];
         for (int i = 1; i < STAGED_FRAME_COUNT; i++) {
-            framePool.offer(new StagedFrame(STAGED_FRAME_CAPACITY));
+            framePool.offer(stagingFrames[i]);
         }
 
         Thread t = new Thread(this::feederLoop, "H264-Feeder");
@@ -641,12 +686,17 @@ public class H264Renderer {
     /** Feeder thread main loop — drains FIFO staging queue and feeds to codec via sync dequeueInputBuffer. */
     private void feederLoop() {
         Process.setThreadPriority(Process.THREAD_PRIORITY_DISPLAY);
+        // Pool generation this feeder belongs to (see stagingGeneration). initStaging() bumps it
+        // before starting the thread, so Thread.start() publishes the current value here.
+        final int gen = stagingGeneration;
         try {
-            while (running) {
+            while (running && stagingGeneration == gen) {
                 StagedFrame frame = stagingPoll();
                 if (frame != null) {
-                    decodeFrame(frame);
-                    framePool.offer(frame);
+                    decodeFrame(frame, gen);
+                    // Return the buffer only while this pool generation is still current — a
+                    // stale feeder must never offer into a newer session's (reused) pool.
+                    if (stagingGeneration == gen) framePool.offer(frame);
 
                     // After feeding, if a staging drop occurred, ask the source for an
                     // IDR (cooldown-bounded) so subsequent P-frames decode cleanly.
@@ -690,8 +740,12 @@ public class H264Renderer {
      * - PTS from elapsed time
      * - flags=0 for ALL frames (including CSD)
      * - Starts render thread on first frame
+     *
+     * @param gen the feeder's staging-pool generation; handed to the render thread it
+     *            starts so a stale feeder can never spawn a render thread for the next
+     *            session's codec (see {@link #renderLoop}).
      */
-    private void decodeFrame(StagedFrame frame) {
+    private void decodeFrame(StagedFrame frame, int gen) {
         MediaCodec codec = mCodec;
         if (codec == null) return;
 
@@ -742,7 +796,7 @@ public class H264Renderer {
 
                     if (count == 0) {
                         // Start render thread on first frame (matching Autokit)
-                        startRenderThread();
+                        startRenderThread(gen);
                     }
                     long frameNum = frameCnt.incrementAndGet();
                     inputted = true;
@@ -771,9 +825,11 @@ public class H264Renderer {
     /**
      * Start the render thread. Called on first successfully queued frame.
      * Matches Autokit: render thread loops on dequeueOutputBuffer, releases with render=true.
+     *
+     * @param gen the staging-pool generation this render thread belongs to (the feeder's).
      */
-    private void startRenderThread() {
-        Thread rt = new Thread(this::renderLoop, "H264-Render");
+    private void startRenderThread(final int gen) {
+        Thread rt = new Thread(() -> renderLoop(gen), "H264-Render");
         rt.setDaemon(true);
         renderThread = rt;
         rt.start();
@@ -787,24 +843,33 @@ public class H264Renderer {
      * - Initial dequeueOutputBuffer with 100ms timeout
      * - Inner polling loop with timeout=0
      * - All decoded frames rendered immediately (no frame dropping for live UI)
+     *
+     * Lifetime (rev 156): the thread exits ONLY when {@code running} drops (stop/reset/
+     * resume teardown), when its pool generation goes stale (a newer start() happened —
+     * the same guard the feeder uses, so a thread that outlived stopStaging()'s 1 s join
+     * can never drain the next session's codec alongside its own render thread), or when
+     * {@code mCodec} is null. Any exception from the codec — the IllegalStateException a
+     * sync-mode flush() raises on the blocked dequeue, a transient CodecException — is
+     * logged (rate-limited), followed by a short lock-free backoff, and the loop goes on.
+     * In sync mode the codec is back in STARTED once the flush completes, so the very next
+     * dequeueOutputBuffer succeeds and decoded frames reach the Surface again as soon as
+     * the post-overlay IDR is fed. Nothing here touches the staging queue or pool.
      */
-    private void renderLoop() {
+    private void renderLoop(final int gen) {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO);
         MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
+        long consecutiveErrors = 0;
+        long totalErrors = 0;
 
-        try {
-            while (running) {
-                MediaCodec codec = mCodec;
-                if (codec == null) break;
+        while (running && stagingGeneration == gen) {
+            MediaCodec codec = mCodec;
+            if (codec == null) break;
 
-                int outputBufferIndex;
-                try {
-                    outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, DEQUEUE_OUTPUT_TIMEOUT_US);
-                } catch (Exception e) {
-                    if (running) {
-                        logPerf("dequeueOutputBuffer error: " + e.getMessage());
-                    }
-                    break;
+            try {
+                int outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, DEQUEUE_OUTPUT_TIMEOUT_US);
+                if (consecutiveErrors > 0) {
+                    logPerf("Render thread recovered after " + consecutiveErrors + " dequeue error(s)");
+                    consecutiveErrors = 0;
                 }
 
                 do {
@@ -854,12 +919,10 @@ public class H264Renderer {
                             // Ignore release errors
                         }
 
-                        // Inner polling loop: drain all available output buffers without blocking
-                        try {
-                            outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, 0);
-                        } catch (Exception e) {
-                            break;
-                        }
+                        // Inner polling loop: drain all available output buffers without
+                        // blocking. An exception here propagates to the outer catch below
+                        // (same backoff-and-continue handling as the blocking dequeue).
+                        outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, 0);
                         continue;  // Process the newly dequeued buffer
                     }
 
@@ -867,19 +930,38 @@ public class H264Renderer {
                     // the inner drain loop and re-block on the outer dequeue.
                     outputBufferIndex = -1;
                 } while (outputBufferIndex >= 0);
-            }
-        } catch (Exception e) {
-            if (running) {
-                logPerf("Render loop exception: " + e);
+            } catch (Exception e) {
+                // Codec error on this thread (flush-cancelled dequeue, transient
+                // CodecException, ...). Stay alive unless we are being torn down.
+                consecutiveErrors++;
+                totalErrors++;
+                if (!running || stagingGeneration != gen) break;
+                if (consecutiveErrors == 1 || consecutiveErrors % RENDER_ERROR_LOG_EVERY == 0) {
+                    logPerf("dequeueOutputBuffer error #" + consecutiveErrors + " (" + e
+                            + ") — render thread staying alive, backing off "
+                            + (RENDER_ERROR_BACKOFF_NS / 1_000_000L) + "ms");
+                }
+                // No lock is held here; stopInternal() only needs `running` to go false
+                // for the loop to exit within one backoff + one 100 ms dequeue timeout,
+                // well inside stopStaging()'s 1 s join.
+                LockSupport.parkNanos(RENDER_ERROR_BACKOFF_NS);
             }
         }
-        logPerf("Render thread stopped");
+        logPerf("Render thread stopped" + (totalErrors > 0 ? " (dequeue errors survived: " + totalErrors + ")" : "")
+                + (stagingGeneration != gen ? " [stale generation]" : ""));
     }
 
     /**
      * Extract SPS/PPS from a CSD bundle and cache them.
      * Notifies CsdExtractedCallback for persistent storage.
      * Does NOT use BUFFER_FLAG_CODEC_CONFIG — just caches for the callback.
+     *
+     * Compare-before-copy: CarPlay bundles the same SPS+PPS with EVERY IDR (rev 51/57 USB
+     * captures) and the app requests an IDR every 30 s, so the parameter sets almost never
+     * change. The two copyOfRange allocations and the callback (a SharedPreferences write in
+     * CarlinkManager) now only happen when the bytes actually differ from the cached copies.
+     * Cache contents and consumers are unchanged (rev 75 pre-stage hook, kept; a documented
+     * no-op for the sync-mode codec since rev 98 — see configureWithCsd).
      */
     private void extractAndCacheCsd(byte[] data, int offset, int length) {
         int csdEnd = length;
@@ -889,16 +971,21 @@ public class H264Renderer {
         }
 
         int ppsOffset = findNalOffset(data, offset + 4, csdEnd - 4, NAL_PPS);
-        if (ppsOffset < 0) {
-            cachedSps = java.util.Arrays.copyOfRange(data, offset, offset + csdEnd);
-            cachedSpsLength = csdEnd;
+        int spsLen = ppsOffset < 0 ? csdEnd : ppsOffset - offset;
+        int ppsLen = ppsOffset < 0 ? 0 : offset + csdEnd - ppsOffset;
+
+        if (csdMatchesCache(data, offset, spsLen, ppsOffset, ppsLen)) {
+            return;  // identical to what is already cached (and persisted) — nothing to do
+        }
+
+        cachedSps = java.util.Arrays.copyOfRange(data, offset, offset + spsLen);
+        cachedSpsLength = spsLen;
+        if (ppsLen > 0) {
+            cachedPps = java.util.Arrays.copyOfRange(data, ppsOffset, ppsOffset + ppsLen);
+            cachedPpsLength = ppsLen;
+        } else {
             cachedPps = null;
             cachedPpsLength = 0;
-        } else {
-            cachedSps = java.util.Arrays.copyOfRange(data, offset, ppsOffset);
-            cachedSpsLength = ppsOffset - offset;
-            cachedPps = java.util.Arrays.copyOfRange(data, ppsOffset, offset + csdEnd);
-            cachedPpsLength = offset + csdEnd - ppsOffset;
         }
 
         log("[VIDEO] Cached CSD: SPS=" + cachedSpsLength + "B, PPS=" + cachedPpsLength + "B");
@@ -907,6 +994,25 @@ public class H264Renderer {
         if (cb != null) {
             cb.onCsdExtracted(cachedSps, cachedSpsLength, cachedPps, cachedPpsLength);
         }
+    }
+
+    /** True when the SPS (and PPS, if any) bytes in {@code data} are byte-identical to the cached copies. */
+    private boolean csdMatchesCache(byte[] data, int spsOffset, int spsLen, int ppsOffset, int ppsLen) {
+        byte[] sps = cachedSps;
+        if (sps == null || cachedSpsLength != spsLen || cachedPpsLength != ppsLen) return false;
+        if (!rangeEquals(sps, data, spsOffset, spsLen)) return false;
+        if (ppsLen == 0) return true;
+        byte[] pps = cachedPps;
+        return pps != null && rangeEquals(pps, data, ppsOffset, ppsLen);
+    }
+
+    /** {@code cached[0..len) == data[dataOffset..dataOffset+len)} without allocating. */
+    private static boolean rangeEquals(byte[] cached, byte[] data, int dataOffset, int len) {
+        if (cached.length < len) return false;
+        for (int i = 0; i < len; i++) {
+            if (cached[i] != data[dataOffset + i]) return false;
+        }
+        return true;
     }
 
     // H.264 NAL unit types (ITU-T H.264 Table 7-1)

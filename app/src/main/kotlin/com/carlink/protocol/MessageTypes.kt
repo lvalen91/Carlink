@@ -286,15 +286,15 @@ enum class MessageType(
     FACTORY_SETTING(0x77), // Factory setting idle notification (A→H: empty) / factory reset (H→A: 4B)
     // Dual-direction wire IDs. These enum names reflect the INBOUND (adapter→host) meaning,
     // which is how the Android parser routes them. Firmware reuses the same IDs with
-    // different outbound semantics; OUTBOUND senders (MessageSerializer.serializeRebootAdapter,
-    // serializeUsbReset) piggy-back on the inbound enum entry for wire-type encoding —
+    // different outbound semantics; the OUTBOUND sender (MessageSerializer.serializeRebootAdapter)
+    // piggy-backs on the inbound enum entry for wire-type encoding —
     // the name does NOT reflect what's being sent. Cross-referenced against macOS
     // carlink_macOS/Protocol/MessageTypes.swift which models each direction separately.
     //
     //   0x88  A→H: AdapterIdle state notification           | H→A: DebugTest   (macOS: debugTest)
     //   0xBB  A→H: Status/config value                      | H→A: UpdateState (macOS: updateState) — not used by Android outbound
     //   0xCD  A→H: Heartbeat ack (every 2s)                 | H→A: Reboot adapter — USED OUTBOUND via serializeRebootAdapter (MessageSerializer.kt:291)
-    //   0xCE  A→H: Error report                             | H→A: USB reset   — USED OUTBOUND via serializeUsbReset     (MessageSerializer.kt:296)
+    //   0xCE  A→H: Error report                             | H→A: USB reset   — not used by Android outbound
     //   0xF0  A→H: Remote display parameters                | H→A: Enable crypt (CMD_ENABLE_CRYPT)
     //   0xFD  A→H: Firmware update progress                 | H→A: Display ready (macOS: displayReady) — not used by Android outbound
     //
@@ -303,7 +303,7 @@ enum class MessageType(
     // call-site documents intent.
     ADAPTER_IDLE(0x88),     // A→H name; H→A = debugTest (not used here)
     HEARTBEAT_ECHO(0xCD),   // A→H name; H→A = rebootAdapter (MessageSerializer.serializeRebootAdapter)
-    ERROR_REPORT(0xCE),     // A→H name; H→A = resetUSB     (MessageSerializer.serializeUsbReset)
+    ERROR_REPORT(0xCE),     // A→H name; H→A = resetUSB (not used by Android outbound)
     REMOTE_DISPLAY(0xF0),   // A→H name; H→A = enableCrypt (not used here)
     UPDATE_PROGRESS(0xFD),  // A→H name; H→A = displayReady (not used here)
     DEBUG_TRACE(0xFF), // Debug/trace data from adapter
@@ -534,8 +534,9 @@ data class AdapterConfig(
     var height: Int = 720,
     var fps: Int = 60,
     var dpi: Int = 160,
-    /** True if user explicitly selected a resolution (non-AUTO). When true, CarlinkManager
-     *  will use these width/height values instead of actual surface dimensions. */
+    /** True when width/height are deliberately pinned away from the surface size: the user
+     *  picked a resolution (non-AUTO) or DecoderCompat clamped it to what the local decoder
+     *  starts. CarlinkManager then keeps these values and suppresses the divergence WARN. */
     val userSelectedResolution: Boolean = false,
     val format: Int = 5,
     val iBoxVersion: Int = 2,

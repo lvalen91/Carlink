@@ -5,9 +5,12 @@ import android.os.Process
 import com.carlink.logging.Logger
 import com.carlink.logging.logInfo
 import com.carlink.logging.logNavi
+import com.carlink.navigation.ClusterIconDelivery
 import com.carlink.navigation.Iap2ManeuverData
 import com.carlink.navigation.Iap2RouteData
 import com.carlink.navigation.Iap2RouteParser
+import com.carlink.provider.StableIconRegistry
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
 
@@ -56,9 +59,16 @@ object ComposedIconStore {
      * cluster downscales (most clusters render at 88-200dp = ~100-400px) produce clean
      * results. 512×512 ARGB_8888 = 1MB per icon × ~20 maneuvers/route = ~20MB cache —
      * acceptable for a non-CPU-constrained host phone. Bump to 1024 if any cluster's
-     * native icon slot exceeds 512px. Truly-scalable delivery would need the ContentURI
-     * render-on-demand provider pattern (see ClusterIconShimProvider) instead of
-     * pre-rendered bitmaps, but bitmap is the only IPC-serializable format for CarIcon.
+     * native icon slot exceeds 512px.
+     *
+     * Delivery format (corrected rev 156): bitmap is NOT the only IPC-serializable CarIcon
+     * form — `IconCompat.TYPE_URI` (content://) marshals too, and Templates Host hashes it by
+     * content instead of assigning a random id per updateTrip (see
+     * [com.carlink.provider.StableIconRegistry]). When
+     * [com.carlink.navigation.ClusterIconDelivery.useStableUriIcons] is on, the worker also
+     * PNG-encodes each unique bitmap once and registers it so ManeuverMapper can publish a
+     * stable `content://.../stable/<hash>` URI; the bitmap itself is kept as the fallback.
+     * GM only ever asks the shim for a 100x100 render (Potato), so 512 is generous.
      */
     private const val ICON_SIZE_PX = 512
 
@@ -103,11 +113,30 @@ object ComposedIconStore {
     private var routeData: Iap2RouteData? = null
 
     @Volatile
-    private var iconByKey: Map<IconKey, Bitmap> = emptyMap()
+    private var iconByKey: Map<IconKey, ComposedEntry> = emptyMap()
+
+    /**
+     * One composed maneuver icon: the rendered [bitmap] (always present — the
+     * `createWithBitmap` fallback) plus, when the stable-URI path was on at compose time,
+     * the [StableIconRegistry] key of its PNG so ManeuverMapper can publish a content URI.
+     */
+    internal class ComposedEntry(
+        val bitmap: Bitmap,
+        val stableKey: String?,
+    )
 
     /** Cursor for the cursor-walk matcher — remembers the last matched maneuver index. */
     @Volatile
     private var cursorIndex: Int = 0
+
+    /**
+     * Route parsed by [populateFromIap2m] whose bitmap compose was deferred (caller passed
+     * `compose=false`, i.e. cluster navigation was OFF when the route-calc burst arrived).
+     * [ensureComposed] dispatches it the first time cluster navigation is seen ON while this
+     * route is still current, so a mid-route enable still gets composed icons. Guarded by
+     * [publishLock]; cleared by [clear] and by the next populate.
+     */
+    private var pendingCompose: Iap2RouteData? = null
 
     /**
      * Single-thread background worker for the per-maneuver compose+render. Daemon so it never
@@ -146,9 +175,16 @@ object ComposedIconStore {
      * same thread; the expensive per-maneuver compose+render is handed to [composeExecutor] so
      * it never blocks USB video reads. On parse failure the prior cache is left in place.
      *
-     * @return number of maneuvers dispatched for background compose, or null if parsing failed
+     * @param compose false to publish the parsed route only and DEFER the per-maneuver
+     *   bitmap compose+render (the caller knows nothing will read the bitmaps right now —
+     *   cluster navigation is OFF). The route stays parked in [pendingCompose] so a later
+     *   [ensureComposed] can still build the icons if cluster navigation is enabled mid-route.
+     * @return number of maneuvers parsed (dispatched or deferred), or null if parsing failed
      */
-    fun populateFromIap2m(iap2mHex: String): Int? {
+    fun populateFromIap2m(
+        iap2mHex: String,
+        compose: Boolean = true,
+    ): Int? {
         val parsed = Iap2RouteParser.parse(iap2mHex) ?: return null
         if (parsed.maneuvers.isEmpty()) return null
 
@@ -163,6 +199,7 @@ object ComposedIconStore {
             routeData = parsed
             iconByKey = emptyMap()
             cursorIndex = 0
+            pendingCompose = null
         }
 
         // Skip the per-maneuver bitmap compose+render on enum-only clusters (VCU/VCUNH1) — the
@@ -177,9 +214,22 @@ object ComposedIconStore {
             return parsed.maneuvers.size
         }
 
-        val sink = debugSink
-        composeExecutor.execute { composeRoute(parsed, gen, sink) }
+        // Cluster navigation OFF: nothing consumes the bitmaps (ManeuverMapper.buildManeuver is
+        // only reached from the cluster sessions), so don't burn ~80ms/maneuver on the Atom for
+        // output nobody reads. Park the route; ensureComposed() picks it up on a later enable.
+        if (!compose) {
+            synchronized(publishLock) {
+                if (composeGeneration.get() == gen) pendingCompose = parsed
+            }
+            logInfo(
+                "[COMPOSER] Parsed ${parsed.maneuvers.size} maneuvers; bitmap compose DEFERRED " +
+                    "(cluster navigation off, gen=$gen)",
+                tag = Logger.Tags.NAVI,
+            )
+            return parsed.maneuvers.size
+        }
 
+        dispatchCompose(parsed, gen)
         logInfo(
             "[COMPOSER] Parsed ${parsed.maneuvers.size} maneuvers; compose dispatched (gen=$gen)",
             tag = Logger.Tags.NAVI,
@@ -188,10 +238,56 @@ object ComposedIconStore {
     }
 
     /**
+     * Dispatch the compose for a route whose bitmaps were deferred by
+     * [populateFromIap2m] (`compose=false`). Call whenever cluster navigation is observed ON
+     * (e.g. per NAVI_JSON message, inside the cluster-navigation gate); it is a cheap no-op
+     * when nothing is pending, already composed, superseded, or [bitmapComposeEnabled] is off.
+     *
+     * @return true if a deferred compose was dispatched by this call
+     */
+    fun ensureComposed(): Boolean {
+        if (!bitmapComposeEnabled) return false
+        val parsed: Iap2RouteData
+        val gen: Long
+        synchronized(publishLock) {
+            parsed = pendingCompose ?: return false
+            if (parsed !== routeData) {
+                pendingCompose = null
+                return false
+            }
+            pendingCompose = null
+            gen = composeGeneration.get()
+        }
+        dispatchCompose(parsed, gen)
+        logInfo(
+            "[COMPOSER] Deferred compose dispatched for ${parsed.maneuvers.size} maneuvers " +
+                "(cluster navigation now on, gen=$gen)",
+            tag = Logger.Tags.NAVI,
+        )
+        return true
+    }
+
+    private fun dispatchCompose(
+        parsed: Iap2RouteData,
+        gen: Long,
+    ) {
+        val sink = debugSink
+        composeExecutor.execute { composeRoute(parsed, gen, sink) }
+    }
+
+    /**
      * Background worker: compose+render one bitmap per UNIQUE (cpManeuverType, roadName) key —
      * the dedup happens BEFORE the expensive render, so work is O(unique) not O(total
      * maneuvers) — then publish the map iff this job is still the current generation. Runs on
      * [composeExecutor] at THREAD_PRIORITY_BACKGROUND.
+     *
+     * Stable-URI delivery (rev 156): when [ClusterIconDelivery.useStableUriIcons] is on at the
+     * start of the job, each unique bitmap is ALSO PNG-encoded here, once, and registered in
+     * [StableIconRegistry]. This moves the encode Templates Host used to do every second (on
+     * its own process, ~100 ms/tick on the Atom) to a one-off on this background thread —
+     * the same thread and priority as the compose itself, so it still never touches the USB
+     * read thread (rev 139). Off the gate nothing is encoded (rev 155 removed unconditional
+     * PNG work from release builds; this keeps it that way).
      */
     private fun composeRoute(
         parsed: Iap2RouteData,
@@ -199,8 +295,10 @@ object ComposedIconStore {
         sink: ((Iap2ManeuverData, Bitmap) -> Unit)?,
     ) {
         Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
-        val newMap = HashMap<IconKey, Bitmap>(parsed.maneuvers.size)
+        val publishStableUris = ClusterIconDelivery.useStableUriIcons()
+        val newMap = HashMap<IconKey, ComposedEntry>(parsed.maneuvers.size)
         var composed = 0
+        var registered = 0
         for (maneuver in parsed.maneuvers) {
             // Superseded by a newer route or a clear()? Drop partial work and stop.
             if (composeGeneration.get() != gen) {
@@ -213,7 +311,9 @@ object ComposedIconStore {
             try {
                 val composedIcon = ManeuverComposer.compose(maneuver)
                 val bmp = IconBitmapRenderer.render(ICON_SIZE_PX, composedIcon)
-                newMap[key] = bmp
+                val stableKey = if (publishStableUris) registerPng(bmp) else null
+                if (stableKey != null) registered++
+                newMap[key] = ComposedEntry(bmp, stableKey)
                 sink?.invoke(maneuver, bmp)
                 composed++
             } catch (e: NoSuchElementException) {
@@ -236,14 +336,29 @@ object ComposedIconStore {
             iconByKey = newMap
         }
         logInfo(
-            "[COMPOSER] Composed $composed unique icons / ${parsed.maneuvers.size} maneuvers (gen=$gen)",
+            "[COMPOSER] Composed $composed unique icons / ${parsed.maneuvers.size} maneuvers (gen=$gen" +
+                "${if (publishStableUris) ", $registered stable PNGs registered, registry=${StableIconRegistry.size()}" else ""})",
             tag = Logger.Tags.NAVI,
         )
     }
 
+    /** PNG-encode [bmp] and register it; null (bitmap fallback for this icon) if the encode fails. */
+    private fun registerPng(bmp: Bitmap): String? =
+        try {
+            val out = ByteArrayOutputStream(8 * 1024)
+            if (bmp.compress(Bitmap.CompressFormat.PNG, 100, out)) {
+                StableIconRegistry.register(out.toByteArray())
+            } else {
+                null
+            }
+        } catch (e: Throwable) {
+            Logger.w("[COMPOSER] stable PNG encode failed: ${e.message} — bitmap fallback", tag = Logger.Tags.NAVI)
+            null
+        }
+
     /** Recycle every bitmap in a not-yet-published map to free native memory immediately. */
-    private fun recycleAll(map: Map<IconKey, Bitmap>) {
-        map.values.forEach { if (!it.isRecycled) it.recycle() }
+    private fun recycleAll(map: Map<IconKey, ComposedEntry>) {
+        map.values.forEach { if (!it.bitmap.isRecycled) it.bitmap.recycle() }
     }
 
     /**
@@ -258,7 +373,13 @@ object ComposedIconStore {
      * cursor on a match. Handles re-routes (cursor reset on next populateFromIap2m) and
      * duplicate (type, road) pairs (cursor walks past them).
      */
-    fun lookup(cpManeuverType: Int, roadName: String?): Bitmap? {
+    fun lookup(cpManeuverType: Int, roadName: String?): Bitmap? = lookupEntry(cpManeuverType, roadName)?.bitmap
+
+    /**
+     * Same cursor-walk as [lookup] but returns the whole [ComposedEntry] (bitmap + optional
+     * stable-URI key). ManeuverMapper uses this so a single lookup advances the cursor once.
+     */
+    internal fun lookupEntry(cpManeuverType: Int, roadName: String?): ComposedEntry? {
         if (!enabled) return null
         val route = routeData ?: return null
         // Find the matching maneuver index using the LOOSE matcher (post-road OR instruction-text).
@@ -272,11 +393,13 @@ object ComposedIconStore {
 
         cursorIndex = foundIdx
         val maneuver = route.maneuvers[foundIdx]
-        val bmp = iconByKey[IconKey(maneuver.cpManeuverType, maneuver.postManeuverRoadName)]
+        val entry = iconByKey[IconKey(maneuver.cpManeuverType, maneuver.postManeuverRoadName)]
         logNavi {
-            "[COMPOSER] Lookup matched idx=$foundIdx cpType=$cpManeuverType road=\"$roadName\" -> ${if (bmp != null) "bitmap[${bmp.width}x${bmp.height}]" else "no bitmap (compose failed earlier)"}"
+            val bmp = entry?.bitmap
+            "[COMPOSER] Lookup matched idx=$foundIdx cpType=$cpManeuverType road=\"$roadName\" -> " +
+                if (bmp != null) "bitmap[${bmp.width}x${bmp.height}] stableKey=${entry.stableKey}" else "no bitmap (compose failed earlier)"
         }
-        return bmp
+        return entry
     }
 
     /** Wipe the cache. Called on NaviStatus=0 flush or before re-populating. */
@@ -286,12 +409,15 @@ object ComposedIconStore {
             composeGeneration.incrementAndGet()
             if (iconByKey.isNotEmpty()) {
                 // Recycle bitmaps to release native memory immediately rather than waiting for GC.
-                iconByKey.values.forEach { if (!it.isRecycled) it.recycle() }
+                // The registered PNGs (StableIconRegistry) are deliberately NOT dropped here —
+                // the host may still fetch a URI it already has an id for; see the registry KDoc.
+                iconByKey.values.forEach { if (!it.bitmap.isRecycled) it.bitmap.recycle() }
                 logInfo("[COMPOSER] Cleared ${iconByKey.size} icons", tag = Logger.Tags.NAVI)
             }
             routeData = null
             iconByKey = emptyMap()
             cursorIndex = 0
+            pendingCompose = null
         }
     }
 }

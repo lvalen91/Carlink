@@ -12,9 +12,8 @@ import kotlin.math.sin
  * on macOS arm64e — see `~/Documents/Apple_Maps_SVG/MAPKIT_DISPATCH_OBSERVED.md`).
  *
  * Bundled bezier data is the deterministic output of Apple's own bezier-builder code; we
- * don't re-implement Apple's geometry, we look it up. This replaces the prior synthesis
- * approach in [RoundaboutComposer] which produced fragmented icons that didn't match
- * Apple's quality.
+ * don't re-implement Apple's geometry, we look it up. This replaced a prior runtime-synthesis
+ * approach (since removed) which produced fragmented icons that didn't match Apple's quality.
  *
  * Inputs come from the iAP2 protocol (carlink_native namespace, `cpManeuverType` 0–53);
  * see `Apple_Maps_Maneuver_Icons_RE.md` §9 for the cpType→shape mapping.

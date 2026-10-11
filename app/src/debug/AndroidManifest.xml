@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- DEBUG-ONLY manifest additions. Merged into debug variants only (src/debug source set);
+     release APKs/AABs never contain these components. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <application>
+        <!-- adb-settable runtime overrides for A/B testing on the GM VM / radio without a
+             rebuild (rev 156). Writes booleans into the "carlink_debug_overrides"
+             SharedPreferences that ClusterIconDelivery reads live. Exported on purpose:
+             `adb shell am broadcast` from the shell uid must reach it. Debug builds only. -->
+        <receiver
+            android:name="com.carlink.debug.DebugOverrideReceiver"
+            android:exported="true"
+            tools:ignore="ExportedReceiver">
+            <intent-filter>
+                <action android:name="zeno.carlink.DEBUG_OVERRIDE" />
+            </intent-filter>
+        </receiver>
+    </application>
+
+</manifest>

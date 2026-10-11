@@ -152,9 +152,30 @@ object NavigationStateManager {
     /** Content hash of the current icon to avoid redundant BitmapFactory decodes. */
     private var currentIconHash = 0
 
+    /**
+     * [com.carlink.provider.StableIconRegistry] key of [currentManeuverIcon]'s PNG bytes
+     * (rev 156). AA ships the icon AS a PNG, so registering it is a map put with no encode;
+     * it is done unconditionally so the stable-URI switch can flip mid-session without
+     * waiting for the next icon. ManeuverMapper decides at build time whether to publish
+     * the URI or the bitmap. Null whenever [currentManeuverIcon] is null.
+     */
+    @Volatile
+    var currentManeuverIconKey: String? = null
+        private set
+
     /** Null until checked; then true when the cluster icon provider can be resolved by this app. */
     @Volatile
     private var isClusterIconProviderAvailable: Boolean? = null
+
+    /**
+     * True when the GM Templates Host cluster-icon authority resolves to THIS package — i.e.
+     * our ClusterIconShimProvider is registered under the GM literal (sideload flavor, or the
+     * owner's play build; rev 128). A fork's play build registers a derived authority, so the
+     * GM literal resolves to nothing and this stays false. Set once in [initialize] from the
+     * same (deliberately untemplated) probe; read by ClusterIconDelivery's platform gate.
+     */
+    @Volatile
+    private var clusterIconProviderOwnedByApp: Boolean = false
 
     /**
      * True on the GM VCU/VCUNH1 (CT5, AAOS 14) cluster, where the QNX safety-domain VM renders a
@@ -197,6 +218,7 @@ object NavigationStateManager {
                     (providerInfo.packageName == appContext.packageName || providerInfo.exported)
 
             isClusterIconProviderAvailable = isAccessible
+            clusterIconProviderOwnedByApp = providerInfo != null && providerInfo.packageName == appContext.packageName
 
             if (isAccessible) {
                 logInfo(
@@ -228,9 +250,13 @@ object NavigationStateManager {
     /** True unless this is an enum-only cluster OR we confirmed the provider is unavailable. */
     fun canUseAaManeuverIcon(): Boolean = !clusterEnumOnly && isClusterIconProviderAvailable != false
 
+    /** See [clusterIconProviderOwnedByApp]. False until [initialize] has run. */
+    fun isClusterIconAuthorityOwned(): Boolean = clusterIconProviderOwnedByApp
+
     private fun dropCurrentManeuverIcon() {
         val hadIcon = currentManeuverIcon != null || currentIconHash != 0
         currentManeuverIcon = null
+        currentManeuverIconKey = null
         currentIconHash = 0
         if (hadIcon) {
             ManeuverMapper.clearCache()
@@ -666,13 +692,18 @@ object NavigationStateManager {
 
         val bitmap = BitmapFactory.decodeByteArray(imageData, 0, imageData.size)
         if (bitmap != null) {
+            // Register the PNG bytes for the stable-URI transport (rev 156) BEFORE publishing
+            // the bitmap, so a Maneuver built from this icon always finds its key. Map put only
+            // (no encode); ~2-4 KB per icon, LRU-bounded in the registry.
+            val stableKey = com.carlink.provider.StableIconRegistry.register(imageData)
+            currentManeuverIconKey = stableKey
             currentManeuverIcon = bitmap
             currentIconHash = hash
             // Evict maneuver cache so next buildManeuver() picks up the new icon
             ManeuverMapper.clearCache()
             logInfo(
                 "[NAVI_ICON] Decoded AA maneuver icon: ${bitmap.width}x${bitmap.height}, " +
-                    "${imageData.size}B, hash=$hash",
+                    "${imageData.size}B, hash=$hash, stableKey=$stableKey",
                 tag = Logger.Tags.NAVI,
             )
         } else {

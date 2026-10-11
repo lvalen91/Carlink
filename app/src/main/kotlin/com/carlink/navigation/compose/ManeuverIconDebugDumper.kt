@@ -30,8 +30,17 @@ import java.io.FileOutputStream
  *
  * Cluster behavior is unaffected by whether the dumper is enabled — it's a pure side
  * effect on top of the compose pipeline.
+ *
+ * DEBUG-ONLY: [com.carlink.CarlinkManager] enables this only when `BuildConfig.DEBUG`.
+ * Each PNG encode of a 512x512 ARGB bitmap costs tens of ms on the gminfo37 Atom, on the
+ * same single IconComposer thread as the compose itself, so release builds never pay it.
+ * Session directories are capped at [MAX_SESSION_DIRS]: the oldest are pruned whenever a
+ * new one is created (and once at [enable]), so debug installs don't grow without bound.
  */
 object ManeuverIconDebugDumper {
+    /** Newest session directories kept under `composer_test/`; older ones are deleted. */
+    private const val MAX_SESSION_DIRS = 5
+
     /** Set by [enable]; if null, [onIconComposed] is a no-op. */
     @Volatile
     private var baseDir: File? = null
@@ -58,6 +67,39 @@ object ManeuverIconDebugDumper {
         sessionDir = null
         ComposedIconStore.debugSink = ::onIconComposed
         logInfo("[COMPOSER_DUMP] enabled, output dir = ${dir.absolutePath}", tag = Logger.Tags.NAVI)
+        // Prune leftovers from earlier runs off the caller's thread (enable() runs in
+        // CarlinkManager.init on the main thread; directory walks + deletes are disk I/O).
+        Thread({ pruneOldSessions(dir, keep = MAX_SESSION_DIRS) }, "ComposerDumpPrune").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    /**
+     * Delete the oldest session directories so at most [keep] remain. Session names start
+     * with a `yyyyMMdd_HHmmss` timestamp, so lexical order == chronological order.
+     * Runs on the IconComposer thread (from [onIconComposed]) or the prune thread (from
+     * [enable]); never on the USB read thread.
+     */
+    private fun pruneOldSessions(
+        base: File,
+        keep: Int,
+    ) {
+        try {
+            val sessions = base.listFiles { f -> f.isDirectory }?.sortedBy { it.name } ?: return
+            val excess = sessions.size - keep
+            if (excess <= 0) return
+            var removed = 0
+            for (dir in sessions.take(excess)) {
+                if (dir.deleteRecursively()) removed++
+            }
+            logInfo(
+                "[COMPOSER_DUMP] Pruned $removed/$excess old session dir(s), keeping newest $keep",
+                tag = Logger.Tags.NAVI,
+            )
+        } catch (e: Throwable) {
+            logWarn("[COMPOSER_DUMP] prune failed: ${e.message}", tag = Logger.Tags.NAVI)
+        }
     }
 
     fun disable() {
@@ -77,6 +119,8 @@ object ManeuverIconDebugDumper {
             val ts = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US)
                 .format(java.util.Date())
             val firstRoad = maneuver.instructionText.take(32).replace(Regex("[^A-Za-z0-9]"), "")
+            // Make room first: keep MAX_SESSION_DIRS - 1 so this new one fits under the cap.
+            pruneOldSessions(base, keep = MAX_SESSION_DIRS - 1)
             val d = File(base, "${ts}_$firstRoad")
             d.mkdirs()
             sessionDir = d

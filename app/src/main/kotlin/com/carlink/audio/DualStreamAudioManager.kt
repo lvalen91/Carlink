@@ -15,6 +15,7 @@ import com.carlink.protocol.StreamPurpose
 import com.carlink.util.LogCallback
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.locks.LockSupport
 
 /**
  * Audio stream type identifiers from CPC200-CCPA protocol.
@@ -130,7 +131,8 @@ class DualStreamAudioManager(
             }
         }
 
-    private var playbackThread: AudioPlaybackThread? = null
+    // @Volatile: writeAudio() (USB thread) unparks it; initialize()/release() own it under `lock`.
+    @Volatile private var playbackThread: AudioPlaybackThread? = null
     private val isRunning = AtomicBoolean(false)
 
     private var navUnderruns: Int = 0
@@ -196,6 +198,17 @@ class DualStreamAudioManager(
     //     (avoids volume-context flap during natural inter-packet gaps).
     //   - ALERT: actually pause (short bursts with explicit start/end signals).
     private val idlePauseMs = 200L
+
+    // Playback-thread cadence when there is NOTHING to serve — no slot track PLAYING or
+    // pending and no nav track active (app idle / searching for the adapter / session up but
+    // no audio yet). Only this fully-idle branch parks; every pass that has an active track
+    // keeps the rev 145 5 ms pacing untouched. writeAudio() unparks the thread on every
+    // enqueue, so the first packet after idle is serviced at least as promptly as before
+    // (it then goes through the unchanged pre-fill → play() path). No AudioTrack state or
+    // focus call is involved, so the rev 105/107/114/115 fixes are not in play here.
+    // Measured cost of the always-5 ms loop while idle on gminfo37: ~174-200 wakeups/s at
+    // nice -19 (1.2-3.8% of a core) during the boot-time window GM is busiest.
+    private val idleParkNanos = 50_000_000L // 50 ms → ~20 wakeups/s while idle
 
     // Reject NAVI_COMPLETE if the prompt has been audible for less than this many ms
     // and the buffer still holds >50ms of data — guards against the adapter sending
@@ -393,6 +406,26 @@ class DualStreamAudioManager(
             return 0
         }
 
+        val written = routeAndEnqueue(data, dataOffset, dataLength, audioType, decodeType, routingState, isZeroFilled)
+        if (written > 0) {
+            // Wake the playback thread if it is in its fully-idle park (see idleParkNanos).
+            // unpark(null) is a no-op; a permit left by a racing unpark makes the next park
+            // return immediately. During active playback (5 ms sleep) this is a cheap no-op.
+            LockSupport.unpark(playbackThread)
+        }
+        return written
+    }
+
+    /** Body of [writeAudio] after the zero-packet filter: route to a slot/nav ring and enqueue. */
+    private fun routeAndEnqueue(
+        data: ByteArray,
+        dataOffset: Int,
+        dataLength: Int,
+        audioType: Int,
+        decodeType: Int,
+        routingState: AudioRoutingState,
+        isZeroFilled: Boolean,
+    ): Int {
         // Route: Navigation → nav track, everything else → per-purpose pre-allocated track
         return when (audioType) {
             AudioStreamType.NAVIGATION -> {
@@ -1098,6 +1131,9 @@ class DualStreamAudioManager(
             while (isRunning.get() && !isInterrupted) {
                 try {
                     var didWork = false
+                    // True if any slot or nav track is PLAYING or pending this pass. Decides
+                    // between the 5 ms pacing (active) and the idle park (nothing to serve).
+                    var anyActive = false
 
                     // === Process all pre-allocated purpose slots ===
                     val slotsSnapshot = listOfNotNull(mediaSlot, siriSlot, phoneCallSlot, alertSlot)
@@ -1107,6 +1143,7 @@ class DualStreamAudioManager(
                         if (track.playState != AudioTrack.PLAYSTATE_PLAYING && !slot.pendingPlay) {
                             continue
                         }
+                        anyActive = true
 
                         val buffer = slot.buffer
                         val currentFillMs = buffer.fillLevelMs()
@@ -1285,6 +1322,7 @@ class DualStreamAudioManager(
                     navBuffer?.let { buffer ->
                         navTrack?.let { track ->
                             if (track.playState == AudioTrack.PLAYSTATE_PLAYING || navPendingPlay) {
+                                anyActive = true
                                 val currentNavFillMs = buffer.fillLevelMs()
 
                                 // Shorter pre-fill for nav (lower latency)
@@ -1416,12 +1454,20 @@ class DualStreamAudioManager(
                         }
                     }
 
-                    // Pace every pass, not just idle ones. Each pass can already stage up
+                    // Pace every ACTIVE pass at 5 ms (rev 145). Each pass can already stage up
                     // to ~100ms/slot (tempBuffer) into a 750ms ring + the AudioTrack buffer,
                     // so a fixed 5ms cadence cannot underfeed at 1x realtime — it removes the
                     // active-playback busy-spin (previously this only slept when fully idle).
                     // NOTE: `didWork` is now vestigial (assigned but unread) — harmless.
-                    sleep(5)
+                    // When NO track is PLAYING or pending (nothing to pace), park instead —
+                    // see idleParkNanos; writeAudio() unparks on the first enqueue. parkNanos
+                    // returns immediately on interrupt and leaves the flag set, so release()'s
+                    // interrupt() still ends the loop via the `!isInterrupted` guard above.
+                    if (anyActive) {
+                        sleep(5)
+                    } else {
+                        LockSupport.parkNanos(idleParkNanos)
+                    }
 
                     // 30s aggregate stats (gated by AUDIO_PERF tag)
                     val now = System.currentTimeMillis()

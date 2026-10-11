@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Static spinner arc (270-degree stroke) used by ui/components/LoadingSpinner.kt.
+    Replaces the former avd_spinner.xml AnimatedVectorDrawable: the infinite 1 s rotation
+    animator redrew the full window at 60 fps while the "searching / waiting" overlays were
+    visible. LoadingSpinner now steps this plain vector's View.rotation at 4 fps instead
+    (same arc geometry, same native drawable path, no per-vsync invalidation).
+    Tint is applied at runtime (DrawableCompat.setTint); the stroke color here is a placeholder.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+
+    <group
+        android:name="spinner_group"
+        android:pivotX="24"
+        android:pivotY="24"
+        android:rotation="0">
+
+        <!-- Spinner arc - partial circle; LoadingSpinner rotates the whole View in 45° steps -->
+        <path
+            android:name="spinner_path"
+            android:pathData="M24,6 A18,18 0 1,1 6,24"
+            android:strokeWidth="4"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeLineCap="round"
+            android:fillColor="#00000000" />
+    </group>
+</vector>

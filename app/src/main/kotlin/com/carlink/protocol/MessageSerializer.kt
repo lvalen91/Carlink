@@ -54,7 +54,9 @@ object MessageSerializer {
      * /etc/RiddleBoxData/HU_NAVISCREEN_SAFEAREA_INFO).
      */
     private const val NAVI_SCREEN_SAFEAREA_INSET_X = 100
-    private const val NAVI_SCREEN_SAFEAREA_INSET_Y = 0
+    // 50px top+bottom padding: safe rect becomes y=50, height=NAVI_SCREEN_HEIGHT-100 (620→520),
+    // keeping the iPhone's interactive CarPlay UI 50px clear of the cluster top/bottom edges.
+    private const val NAVI_SCREEN_SAFEAREA_INSET_Y = 50
 
     /**
      * Create a protocol header for the given message type and payload length.
@@ -334,11 +336,6 @@ object MessageSerializer {
     /** Reboot adapter. Type 0xCD outbound = HUDComand_A_Reboot. Header-only. */
     fun serializeRebootAdapter(): ByteArray = serializeHeaderOnly(MessageType.HEARTBEAT_ECHO)
 
-    /** USB-level reset only (softer than reboot). Type 0xCE outbound = HUDComand_A_ResetUSB.
-     *  CURRENTLY UNUSED — kept as the softer counterpart to serializeRebootAdapter in case
-     *  a USB-reset recovery path is wired up. Delete if no use emerges. */
-    fun serializeUsbReset(): ByteArray = serializeHeaderOnly(MessageType.ERROR_REPORT)
-
     /** Disconnect phone's CarPlay/AA session. Type 0x0F outbound. Header-only. */
     fun serializeDisconnectPhone(): ByteArray = serializeHeaderOnly(MessageType.DISCONNECT_PHONE)
 
@@ -522,64 +519,12 @@ object MessageSerializer {
     }
 
     /**
-     * DISABLED 2026-05-21 — not wired into any init path (the call site in addFullSettings is
-     * commented out). Kept visible for future use against firmware KNOWN to be shell-vulnerable.
-     * Re-enable caveat: `config.boxName` is interpolated UNESCAPED into the inner `sed` command
-     * below — a boxName containing `"`, `;`, `/`, `$()` or backticks corrupts the payload and
-     * can run unintended commands as root; sanitize/escape it before re-enabling.
-     *
-     * Serialize a one-shot BoxSettings frame that exploits the CustomWifiName shell-injection
-     * vulnerability in the adapter firmware to persist safe audio quality values via riddleBoxCfg.
-     *
-     * The firmware passes the JSON wifiName field unsanitized as the replacement value in a
-     * `sed -i` substitution against /etc/hostapd.conf, with the value placed inside double quotes
-     * (the variable expands as `${CustomWifiName}`). Injecting an unescaped double-quote breaks
-     * out into shell command position, where any chained command runs as root — which is the
-     * only reliable path that reaches VoiceQuality / CallQuality in /etc/riddle.conf. The
-     * BoxSettings JSON path is broken for these keys: CMD_BOX_INFO's transform rejects them
-     * with "apk callQuality value transf box value error" — logged-and-dropped, never written
-     * to disk regardless of init mode.
-     *
-     * Payload chain (after firmware shell variable expansion):
-     *   1. orphaned sed call from the firmware's substitution — no file arg, busybox sed errors out, harmless
-     *   2. `riddleBoxCfg -s VoiceQuality 1` — persists VoiceQuality=1 to /etc/riddle.conf
-     *   3. `riddleBoxCfg -s CallQuality 1`  — persists CallQuality=1 to /etc/riddle.conf
-     *   4. our own sed call against /etc/hostapd.conf with the real boxName — restores the correct SSID
-     *   5. `#` at end — shell comment, swallows the firmware's trailing fragment
-     *
-     * Idempotent: safe to fire on every FULL init. If firmware is ever patched, the literal
-     * wifiName string becomes a garbage SSID that the immediately-following normal BoxSettings
-     * frame overwrites — no permanent damage.
-     *
-     * Only the fields needed to deliver the injection are included. The full config (DashboardInfo,
-     * GNSSCapability, androidAutoSizeW/H, etc.) is written by the normal BoxSettings that follows.
-     */
-    @Suppress("unused", "detekt:UnusedPrivateMember")
-    private fun serializeQualityRescueBoxSettings(config: AdapterConfig): ByteArray {
-        // Closes firmware's unsanitized sed double-quote, runs riddleBoxCfg as root,
-        // restores the real SSID, then comments out the firmware's trailing sed fragment.
-        val injectionPayload =
-            "dummy\"; riddleBoxCfg -s VoiceQuality 1; riddleBoxCfg -s CallQuality 1; " +
-                "sed -i \"s/^ssid=.*/ssid=${config.boxName}/\" /etc/hostapd.conf; #"
-
-        val json =
-            JSONObject().apply {
-                put("wifiName", injectionPayload)
-                put("btName", config.boxName)
-                put("boxName", config.boxName)
-                put("syncTime", System.currentTimeMillis() / 1000)
-            }
-        val payload = json.toString().toByteArray(StandardCharsets.US_ASCII)
-        return serializeWithPayload(MessageType.BOX_SETTINGS, payload)
-    }
-
-    /**
      * Serialize a one-shot BoxSettings frame that invokes /tmp/aa_gps_fix.sh
      * via the firmware's unsanitized wifiName shell vulnerability.
      *
-     * Uses POSIX command substitution inside the wifiName value (safer variant
-     * than serializeQualityRescueBoxSettings, which closes out the sed double
-     * quote and corrupts hostapd.conf momentarily). The command substitution
+     * Uses POSIX command substitution inside the wifiName value (safer than the
+     * now-removed quality-rescue variant, which closed out the sed double quote
+     * and corrupted hostapd.conf momentarily). The command substitution
      * runs our watcher script in the background with nohup so the substitution
      * returns an empty string. The wifiName then collapses to the user's real
      * boxName, and the firmware sed runs a no-op idempotent overwrite of the
@@ -696,8 +641,8 @@ object MessageSerializer {
         //   (c) BoxSettings (0x19) with the CLEAN wifiName immediately after, to overwrite
         //       /etc/wifi_name which the firmware writes RAW (the JSON value goes to that
         //       file without shell expansion, so step b left the literal injection text
-        //       persisted there). Following the same overwrite pattern documented on
-        //       serializeQualityRescueBoxSettings; the second BoxSettings restores
+        //       persisted there). Following the same clean-wifiName overwrite
+        //       pattern; the second BoxSettings restores
         //       /etc/wifi_name to the user's real boxName.
         // Script's own PID-file guard (/tmp/aa_gps_fix.pid) prevents stacking watchers when
         // init re-fires without an adapter reboot.
@@ -845,16 +790,6 @@ object MessageSerializer {
         // WiFi band selection
         val wifiCommand = if (config.wifiType == "5ghz") CommandMapping.WIFI_5G else CommandMapping.WIFI_24G
         messages.add(serializeCommand(wifiCommand))
-
-        // Quality rescue — DISABLED 2026-05-21. Was: exploit the CustomWifiName shell injection
-        // to persist VoiceQuality=1 / CallQuality=1 via riddleBoxCfg, sent before the normal
-        // BoxSettings so the real wifiName would overwrite the poisoned SSID afterward.
-        // Why disabled: on adapters whose firmware is NOT shell-vulnerable on wifiName, the
-        // payload is stored verbatim and the garbage string sticks as the live SSID — the
-        // following normal BoxSettings does not reliably overwrite it (confirmed by a user's
-        // adapter web-portal screenshot). VoiceQuality / CallQuality are now never sent.
-        // Kept for future use — re-enable ONLY against firmware known to be shell-vulnerable.
-        // messages.add(serializeQualityRescueBoxSettings(config))
 
         // Box settings JSON — includes DashboardInfo=7 and GNSSCapability=3 always.
         // These are persisted to riddle.conf by the firmware's ConfigFileUtils.
