@@ -248,7 +248,11 @@ private val URI_GRANT_CONSUMERS = listOf(
  * shims over platform APIs — we did not see direct androidx usage. On that basis the
  * Media3 migration appears transparent to the ClusterService → IClusterHmi widget
  * pipeline on the build tested. Re-verify on different GM firmware revisions.
+ *
+ * MediaSession/MediaLibraryService surface; forbidden-to-refactor per brief. Function count is
+ * the MediaSession callback + metadata/playback API kept in one owner.
  */
+@Suppress("TooManyFunctions")
 class MediaSessionManager(
     private val context: Context,
     private val logCallback: LogCallback,
@@ -841,7 +845,10 @@ class MediaSessionManager(
      * @param appName source app ("Spotify", "Apple Music", ...) — goes into subtitle
      * @param albumArt raw JPEG/PNG bytes from the adapter (nullable)
      * @param duration total track duration in ms (0 if unknown)
+     *
+     * MediaSession metadata build from optional fields; branches/params mirror the metadata schema.
      */
+    @Suppress("CyclomaticComplexMethod", "LongMethod", "LongParameterList")
     fun updateMetadata(
         title: String?,
         artist: String?,
@@ -951,7 +958,10 @@ class MediaSessionManager(
      * `putLong(METADATA_KEY_DURATION)`). [setArtworkData] requires a PictureType —
      * we use [MediaMetadata.PICTURE_TYPE_FRONT_COVER] (ID3 v2.4 tag 3, "Cover (front)")
      * per the ID3 spec convention for album art.
+     *
+     * Params are the MediaMetadata fields; passed positionally to the player publish call.
      */
+    @Suppress("LongParameterList")
     private fun publishMetadata(
         player: UsbAdapterPlayer,
         title: String?,
@@ -1279,6 +1289,7 @@ class MediaSessionManager(
                     val controllers = try {
                         ms.connectedControllers.size
                     } catch (e: Exception) {
+                        log("[MEDIA_SESSION] [SNAPSHOT] controller count unavailable: ${e.message}")
                         -1
                     }
                     val md = p.mediaMetadata

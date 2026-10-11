@@ -31,10 +31,12 @@ import kotlin.concurrent.withLock
  *   scheduling caveat.
  * - Writes: 1 Hz async flush from a single-threaded ScheduledExecutorService;
  *   producers (any thread) enqueue via onLog() with O(1) backpressure.
+ *
+ * Singleton stores appContext (applicationContext), not an Activity, so the
+ * static-field-leak rule's concern doesn't apply here.
+ * Function count is the file-logging API (write/rotate/export/query); one cohesive owner.
  */
-// Singleton stores appContext (applicationContext), not an Activity, so the
-// static-field-leak rule's concern doesn't apply here.
-@Suppress("StaticFieldLeak")
+@Suppress("StaticFieldLeak", "TooManyFunctions")
 class FileLogManager internal constructor(
     context: Context,
     private val sessionPrefix: String = "carlink",

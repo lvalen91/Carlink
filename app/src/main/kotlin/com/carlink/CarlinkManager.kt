@@ -94,7 +94,11 @@ import java.util.concurrent.atomic.AtomicReference
  * - Cluster-navigation gating: NAVI_JSON / NAVI_IMAGE are dropped unless
  *   `AdapterConfigPreference.getClusterNavigationSync()` returns true at message time
  *   (read per-message, not cached — see sites in [processMediaMetadata]).
+ *
+ * Central orchestrator for the USB/video/audio/protocol pipelines; size is the cost of keeping
+ * the hot message path in one place. Splitting it risks the working pipeline (see brief).
  */
+@Suppress("LargeClass", "TooManyFunctions")
 class CarlinkManager(
     private val context: Context,
     initialConfig: AdapterConfig = AdapterConfig.DEFAULT,
@@ -583,7 +587,10 @@ class CarlinkManager(
      * @param surfaceWidth Actual width of the surface in pixels
      * @param surfaceHeight Actual height of the surface in pixels
      * @param callback Callbacks for state changes and events
+     *
+     * Surface/codec/audio/USB bring-up sequence; one ordered path, refactoring risks the pipeline.
      */
+    @Suppress("CyclomaticComplexMethod", "LongMethod")
     fun initialize(
         surface: Surface,
         surfaceWidth: Int,
@@ -865,7 +872,10 @@ class CarlinkManager(
      *   and [createVideoProcessor] which warn-and-drops when `h264Renderer == null`).
      * - If an AdapterDriver already exists, calls [stop] internally before starting fresh,
      *   so it is safe to invoke repeatedly (e.g. after a user "reconnect" tap).
+     *
+     * Connection/handshake state machine; sequential, idempotent startup path.
      */
+    @Suppress("CyclomaticComplexMethod", "LongMethod")
     suspend fun start() {
         // Guard: Ensure H264Renderer is initialized before starting connection
         // This prevents video data from being discarded when app starts via MediaBrowserService
@@ -1464,7 +1474,10 @@ class CarlinkManager(
      * Compute AA center-crop parameters from the current adapter config.
      * Returns null for CarPlay, 16:9 displays, or when config has no native dims.
      * Uses config.width/height (video surface dims) to match serializeBoxSettings AR calc.
+     *
+     * Aspect-ratio/crop math mirrors serializeBoxSettings; branch-heavy by design.
      */
+    @Suppress("CyclomaticComplexMethod")
     fun getAaCropParams(): AaCropParams? {
         // Use actual surface dims (ground truth from Compose layout), not config dims
         // (which come from WindowMetrics and may differ due to AAOS dock inset behavior).
@@ -1767,6 +1780,9 @@ class CarlinkManager(
         return device
     }
 
+    // Core protocol dispatch: one big switch over message type. Forbidden-to-refactor per brief;
+    // the branching IS the wire protocol.
+    @Suppress("CyclomaticComplexMethod", "LongMethod", "NestedBlockDepth")
     private fun handleMessage(message: Message) {
         // HAZARD: runs on the USB read thread (single-threaded per AdapterDriver contract).
         // Several branches below do synchronous, non-trivial work that technically violates
@@ -2272,6 +2288,8 @@ class CarlinkManager(
         )
     }
 
+    // Audio command dispatch (play/pause/duck/route by command id); switch mirrors the protocol.
+    @Suppress("CyclomaticComplexMethod", "LongMethod")
     private fun handleAudioCommand(command: AudioCommand, messageDecodeType: Int = 5, rawCommandId: Int = command.id) {
         logDebug(
             "[AUDIO_CMD] ${command.name} (id=${command.id} siri=$isSiriAudioActive call=$isPhoneCallAudioActive alert=$isAlertAudioActive)",
@@ -2598,6 +2616,8 @@ class CarlinkManager(
         }
     }
 
+    // Media metadata assembly from wire fields; many optional fields → high branch count by design.
+    @Suppress("CyclomaticComplexMethod", "LongMethod")
     private fun processMediaMetadata(message: MediaDataMessage) {
         // Route NaviJSON to NavigationStateManager for cluster display (only if enabled)
         if (message.type == MediaType.NAVI_JSON) {

@@ -70,7 +70,11 @@ import com.carlink.ui.settings.DisplayMode
 import com.carlink.ui.theme.AutomotiveDimens
 import kotlinx.coroutines.launch
 
-/** Main projection screen displaying H.264 video via SurfaceView (HWC overlay) with touch forwarding. */
+/**
+ * Main projection screen displaying H.264 video via SurfaceView (HWC overlay) with touch forwarding.
+ * Primary video/UI Compose screen; size/branches are the layout + state handling for the surface.
+ */
+@Suppress("CyclomaticComplexMethod", "LongMethod")
 @Composable
 fun MainScreen(
     carlinkManager: CarlinkManager,
@@ -459,7 +463,11 @@ private data class TouchPoint(
  *
  * AA:     type 0x05, 0..10000 ints  (CarlinkManager converts 0..1 → 0..10000)
  * CarPlay: type 0x17, 0..1 floats   (unchanged)
+ *
+ * Multitouch -> adapter touch protocol translation on the input path; params are the surface/
+ * container geometry, the condition the zero-size guard, nesting the per-pointer handling.
  */
+@Suppress("CyclomaticComplexMethod", "LongParameterList", "NestedBlockDepth", "ComplexCondition")
 private fun handleTouchEvent(
     event: MotionEvent,
     activeTouches: MutableMap<Int, TouchPoint>,

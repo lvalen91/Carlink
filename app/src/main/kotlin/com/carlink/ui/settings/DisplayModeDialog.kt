@@ -76,7 +76,10 @@ import com.carlink.ui.theme.AutomotiveDimens
  * @param onApplyAndRestart Historical name; behavior is an in-place session reinit
  *   via MainActivity.reinitializeForDisplayMode, NOT a process restart. Name is
  *   preserved to avoid breaking callers.
+ *
+ * Compose dialog; length is declarative UI layout.
  */
+@Suppress("LongMethod")
 @Composable
 internal fun DisplayModeDialog(
     displayModePreference: DisplayModePreference,
@@ -349,7 +352,10 @@ private fun applyDisplayModePreview(
  * content color, icon scale) × 4 buttons = 20 animation state objects. Not a
  * flicker risk, but a noticeable recomposition cost on AAOS. Deliberate trade-off
  * for button feel.
+ *
+ * Compose button; length is declarative UI layout.
  */
+@Suppress("LongMethod")
 @Composable
 private fun DisplayModeButton(
     label: String,

@@ -102,7 +102,10 @@ import kotlinx.coroutines.launch
  * @param onReinitAdapter Tier-2 callback. NAME IS MISLEADING: MainActivity implements this
  *   as `reinitializeForDisplayMode`, i.e. a full CarlinkManager rebuild — not just an
  *   adapter re-init. See MainActivity for actual behavior.
+ *
+ * Large Compose config dialog; length/branches are declarative UI + per-field state, not logic.
  */
+@Suppress("CyclomaticComplexMethod", "LongMethod")
 @Composable
 fun AdapterConfigurationDialog(
     adapterConfigPreference: AdapterConfigPreference,
@@ -1067,7 +1070,10 @@ internal fun ConfigurationOptionCard(
  * Audio Source Selection Button
  *
  * Toggle button with animated visual indicator for selected state.
+ *
+ * Compose button; length is declarative UI layout.
  */
+@Suppress("LongMethod")
 @Composable
 private fun AudioSourceButton(
     label: String,

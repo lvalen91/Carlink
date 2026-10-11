@@ -52,7 +52,10 @@ import java.util.concurrent.atomic.AtomicLong
  * Feature-flag gated: nothing wires the store into the cluster icon pipeline unless
  * [enabled] is true. While disabled, populate/lookup still happen for debug-log purposes
  * but the cluster keeps using the static-XML / AA bitmap paths.
+ *
+ * Icon cache/registry facade; function count is the store's get/put/evict/debug API surface.
  */
+@Suppress("TooManyFunctions")
 object ComposedIconStore {
     /**
      * Target bitmap dimensions in pixels. 512 chosen as a high enough resolution that

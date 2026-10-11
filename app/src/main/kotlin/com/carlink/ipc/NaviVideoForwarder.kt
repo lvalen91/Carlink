@@ -180,7 +180,10 @@ class NaviVideoForwarder {
      * decode attempts (harmless) — but misclassifying an IDR as P stalls the
      * decoder. We intentionally lean toward true detection: any 0x05 NAL is
      * a key.
+     *
+     * Scans for the Annex-B 00 00 00 01 start code; the 4-byte term check is the NAL delimiter.
      */
+    @Suppress("ComplexCondition")
     private fun annexBContainsIdr(buf: ByteArray): Boolean {
         var i = 0
         val end = buf.size - 4

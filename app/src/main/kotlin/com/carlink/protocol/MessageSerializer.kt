@@ -10,7 +10,11 @@ import java.nio.charset.StandardCharsets
  *
  * Serializes message objects into binary format for transmission to the Carlinkit adapter.
  * Handles header generation, payload encoding, and type-specific serialization.
+ *
+ * Wire-protocol serializer; forbidden-to-refactor per brief. Function count = one builder per
+ * outgoing message type.
  */
+@Suppress("TooManyFunctions")
 object MessageSerializer {
     /**
      * Gate for the `naviScreenInfo` field in BoxSettings JSON.
@@ -368,7 +372,10 @@ object MessageSerializer {
      * Output is not deterministic: the syncTime field is System.currentTimeMillis()
      * unless an explicit [syncTime] is passed. Two consecutive calls produce different
      * bytes — by design; the firmware expects a fresh timestamp each send.
+     *
+     * Builds the box-settings frame; one branch per config field written to the wire buffer.
      */
+    @Suppress("CyclomaticComplexMethod", "LongMethod")
     fun serializeBoxSettings(
         config: AdapterConfig,
         syncTime: Long? = null,

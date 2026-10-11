@@ -35,7 +35,11 @@ import java.util.concurrent.atomic.AtomicLong
  *  - [isRunning] is the single gate: after [stop], every [send] silently returns
  *    false. Callers that need to distinguish "not running" from "send failed" must
  *    track state externally.
+ *
+ * USB read/write driver + message pump; function count and ctor deps (handlers, timeouts,
+ * video processor) are the wiring surface of the protocol loop.
  */
+@Suppress("TooManyFunctions", "LongParameterList")
 class AdapterDriver(
     private val usbDevice: UsbDeviceWrapper,
     private val messageHandler: (Message) -> Unit,
@@ -382,6 +386,8 @@ class AdapterDriver(
     private fun startReadingLoop() {
         usbDevice.startReadingLoop(
             object : UsbDeviceWrapper.ReadingLoopCallback {
+                // Multi-term type checks route frames on the USB read thread; the conditions are the routing rules.
+                @Suppress("ComplexCondition")
                 override fun onMessage(
                     type: Int,
                     data: ByteArray?,

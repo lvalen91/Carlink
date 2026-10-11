@@ -314,13 +314,17 @@ enum class MessageType(
     UNKNOWN(-1),
     ;
 
-    // Legacy aliases for backwards compatibility
+    // Legacy aliases for backwards compatibility. UPPER_SNAKE matches the enum-constant
+    // naming of the members they alias; renaming would break callers and look inconsistent.
+    @Suppress("VariableNaming")
     @Deprecated("Use PEER_BLUETOOTH_ADDRESS", ReplaceWith("PEER_BLUETOOTH_ADDRESS"))
     val NETWORK_MAC_ADDRESS get() = PEER_BLUETOOTH_ADDRESS
 
+    @Suppress("VariableNaming")
     @Deprecated("Use PEER_BLUETOOTH_ADDRESS_ALT", ReplaceWith("PEER_BLUETOOTH_ADDRESS_ALT"))
     val NETWORK_MAC_ADDRESS_ALT get() = PEER_BLUETOOTH_ADDRESS_ALT
 
+    @Suppress("VariableNaming")
     @Deprecated("Use CLOSE_DONGLE", ReplaceWith("CLOSE_DONGLE"))
     val CLOSE_ADAPTR get() = CLOSE_DONGLE
 

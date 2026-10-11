@@ -97,7 +97,10 @@ enum class LogPreset(
  *     - true: for user-requested diagnostic presets (DEBUG, PERFORMANCE, RX_MESSAGES,
  *       VIDEO_ONLY, AUDIO_ONLY, PIPELINE_DEBUG, CLUSTER_MEDIA) — the user explicitly
  *       asked for diagnostics, so force inline helpers on in release builds too.
+ *
+ * Applies per-tag log levels for the preset; length is the one-line-per-tag config table.
  */
+@Suppress("LongMethod")
 fun LogPreset.apply() {
     when (this) {
         LogPreset.SILENT -> {

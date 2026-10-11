@@ -90,7 +90,10 @@ import java.nio.ByteOrder
  *  - Compose UI host: the top-level [CarlinkApp] composable keeps [MainScreen]
  *    continuously composed (to preserve the VideoSurface / HWC plane) and slides
  *    [SettingsScreen] on top via AnimatedVisibility rather than replacing it.
+ *
+ * Single LAUNCHER activity owning USB/video/audio/surface wiring; function count is that surface.
  */
+@Suppress("TooManyFunctions")
 class MainActivity : ComponentActivity() {
     // Nullable to prevent UninitializedPropertyAccessException if Activity
     // is destroyed before initialization completes (e.g., low memory kill)
@@ -395,6 +398,8 @@ class MainActivity : ComponentActivity() {
         logInfo("[LOGGING] Debug logging: ${if (isDebugBuild) "ENABLED" else "DISABLED (release build)"}", tag = "MAIN")
     }
 
+    // CarlinkManager bring-up + callback wiring; one ordered setup path, refactoring risks startup.
+    @Suppress("CyclomaticComplexMethod", "LongMethod")
     private fun initializeCarlinkManager() {
         // Get window metrics to determine USABLE area (excluding system UI).
         // WindowMetricsCompat falls back to Display.getRealMetrics + WindowInsetsCompat
@@ -651,7 +656,10 @@ class MainActivity : ComponentActivity() {
      * @param audioTransferMode `false` = ADAPTER (audio routed via USB, media session
      *   actively published), `true` = BLUETOOTH (audio via phone BT, session stays
      *   registered but inactive).
+     *
+     * Nesting is the null/state guards around the optional MediaSession reconfigure.
      */
+    @Suppress("NestedBlockDepth")
     private fun applyAudioTransferModeToMediaSession(audioTransferMode: Boolean) {
         if (!audioTransferMode) {
             if (mediaSessionManager == null) {
@@ -785,7 +793,11 @@ class MainActivity : ComponentActivity() {
             .putInt(0) // origin
             .array()
 
-    /** Build HU_SAFEAREA_INFO (20 bytes): [safe_w, safe_h, originX, originY, drawOutside] */
+    /**
+     * Build HU_SAFEAREA_INFO (20 bytes): [safe_w, safe_h, originX, originY, drawOutside]
+     * Params are the individual safe-area dimensions written to the wire frame.
+     */
+    @Suppress("LongParameterList")
     private fun buildSafeAreaData(
         videoW: Int,
         videoH: Int,
@@ -1055,7 +1067,10 @@ class MainActivity : ComponentActivity() {
  * - SettingsScreen slides in ON TOP when showSettings is true
  * - Back button closes SettingsScreen overlay
  * - Video is never stopped during navigation
+ *
+ * Compose root: params are the manager + callbacks threaded to child screens.
  */
+@Suppress("LongParameterList")
 @Composable
 fun CarlinkApp(
     carlinkManager: CarlinkManager,

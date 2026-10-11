@@ -90,7 +90,11 @@ import com.carlink.ui.settings.SettingsTab
 import com.carlink.ui.theme.AutomotiveDimens
 import kotlinx.coroutines.launch
 
-/** Settings screen with NavigationRail for device control, display settings, and log management. */
+/**
+ * Settings screen with NavigationRail for device control, display settings, and log management.
+ * Compose settings screen; length is declarative UI layout, not branching logic.
+ */
+@Suppress("LongMethod")
 @Composable
 fun SettingsScreen(
     carlinkManager: CarlinkManager,
@@ -311,7 +315,10 @@ private enum class ButtonSeverity {
  *   2. `isProcessing` is a single shared flag across 4 actions but only Reset Connection flips
  *      it — the other 3 buttons gate on it but never raise it themselves (UX: spinner appears
  *      on all of them when Reset Connection runs; no per-action progress indicator).
+ *
+ * Compose tab content; length is declarative UI layout.
  */
+@Suppress("LongMethod")
 @Composable
 private fun ControlTabContent(
     carlinkManager: CarlinkManager,
@@ -695,7 +702,10 @@ private fun ControlCard(
  *     see the redundancy note at the `enabled = enabled && !isProcessing` call sites.
  *   - [isProcessing] controls only the visual swap — this composable does not perform
  *     the work or manage the flag's lifecycle.
+ *
+ * Reusable Compose button; length is layout/state styling, params are the standard slot API.
  */
+@Suppress("LongMethod", "LongParameterList")
 @Composable
 private fun ControlButton(
     label: String,

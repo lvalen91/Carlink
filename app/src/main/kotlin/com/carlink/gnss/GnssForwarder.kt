@@ -40,7 +40,10 @@ import kotlin.math.min
  * Firmware buffer limit: adapter NMEA payload is documented as < 1024 bytes. NOT
  * enforced here — a GPGGA+GPRMC pair is ~200 bytes, well under the limit. If more
  * sentence types are added (e.g., $GPGSV), add a length guard in formatNmea().
+ *
+ * GNSS capture + forwarding; function count is the LocationListener surface plus start/stop.
  */
+@Suppress("TooManyFunctions")
 class GnssForwarder(
     private val context: Context,
     private val sendGnssData: (String) -> Boolean,
@@ -83,7 +86,9 @@ class GnssForwarder(
                     )
                 }
 
-                override fun onProviderEnabled(provider: String) {}
+                override fun onProviderEnabled(provider: String) {
+                    // No-op: provider enable/disable is not forwarded; only location fixes matter.
+                }
 
                 override fun onProviderDisabled(provider: String) {
                     log("[GNSS] Provider disabled: $provider")
@@ -94,7 +99,9 @@ class GnssForwarder(
                     provider: String?,
                     status: Int,
                     extras: Bundle?,
-                ) {}
+                ) {
+                    // No-op: deprecated in API 29; provider status is not forwarded.
+                }
             }
 
         try {

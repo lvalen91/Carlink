@@ -94,7 +94,12 @@ object DecoderCompat {
             probe = { w, h -> canStart(w, h, decoderName) },
         )
 
-    /** Search core, separated so the shrink logic is unit-testable without MediaCodec. */
+    /**
+     * Search core, separated so the shrink logic is unit-testable without MediaCodec.
+     * Binary-search decoder-sizing core: guard-clause returns per probe outcome; clock/probe are
+     * DI seams for the unit tests. Branch/return count is the search, not refactorable noise.
+     */
+    @Suppress("CyclomaticComplexMethod", "LongMethod", "LongParameterList", "ReturnCount")
     internal fun adjust(
         width: Int,
         height: Int,
@@ -228,9 +233,11 @@ object DecoderCompat {
                 Probe.REJECTED
             }
         } catch (e: IllegalArgumentException) {
-            // configure() rejected the format outright.
+            // configure() rejected the format outright. Expected path; logged at debug only.
+            logDebugOnly(TAG) { "[DECODER_PROBE] ${width}x$height rejected by configure(): ${e.message}" }
             Probe.REJECTED
         } catch (e: IllegalStateException) {
+            logDebugOnly(TAG) { "[DECODER_PROBE] ${width}x$height rejected in start(): ${e.message}" }
             Probe.REJECTED
         } catch (e: IOException) {
             logWarn("[DECODER_PROBE] Cannot create decoder ${decoderName ?: "default"}: ${e.message}", TAG)

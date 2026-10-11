@@ -70,7 +70,10 @@ private val CARD_WIDTH = 360.dp
  *
  * - USB device card (leftmost): active when a USB phone is connected, greyed out otherwise.
  * - Wireless device cards: queried from adapter's DevList with Connect/Disconnect/Remove actions.
+ *
+ * Compose tab: polling loop + conditional device cards; branches/length are declarative UI.
  */
+@Suppress("CyclomaticComplexMethod", "LongMethod")
 @Composable
 fun PhonesTabContent(carlinkManager: CarlinkManager) {
     val view = LocalView.current
@@ -98,7 +101,7 @@ fun PhonesTabContent(carlinkManager: CarlinkManager) {
     // Rationale: CarlinkManager.callback is single-slot and already consumed by MainScreen,
     // and DeviceListener only fires on DevList changes — neither surfaces state/phoneType/
     // wifi/btMac transitions to secondary observers. 1 Hz polling is a pragmatic workaround.
-    // TODO: multi-observer ConnectionStateListener / StateFlow on CarlinkManager (would also
+    // Deferred: multi-observer ConnectionStateListener / StateFlow on CarlinkManager (would also
     // replace the SettingsScreen.kt:356 stale-remember pattern — same root cause). 1 Hz poll
     // is pragmatic for now; no contention observed in 2026-04-20 POTATO captures.
     LaunchedEffect(carlinkManager) {
@@ -225,7 +228,10 @@ private val AndroidAutoActiveColor = Color(0xFF1A2A3D) // Dark blue tint
  * Always rendered as the leftmost card; shows a branded CarPlay / Android Auto icon when a
  * USB phone is connected, greyed-out UsbOff icon otherwise. Non-interactive — the adapter
  * owns USB session lifecycle.
+ *
+ * Compose card; length is declarative UI layout.
  */
+@Suppress("LongMethod")
 @Composable
 private fun UsbDeviceCard(
     isConnected: Boolean,
@@ -321,7 +327,10 @@ private fun UsbDeviceCard(
  * KDoc) silently fall through to the generic icon/surfaceContainerHighest tint.
  * Suggested fix: map to a DeviceType enum at parseDevList boundary and log unknown
  * values; keep the String on DeviceInfo for debugging.
+ *
+ * Compose card; length is declarative UI layout, params are the device + action callbacks.
  */
+@Suppress("LongMethod", "LongParameterList")
 @Composable
 private fun WirelessDeviceCard(
     device: CarlinkManager.DeviceInfo,

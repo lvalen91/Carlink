@@ -68,7 +68,11 @@ object AudioStreamType {
  * - writeAudio() called from USB thread (non-blocking)
  * - Playback thread handles AudioTrack writes
  * - Volume/ducking can be called from any thread
+ *
+ * Hardware-tuned dual-stream (media + nav/voice) audio engine; forbidden-to-refactor per brief.
+ * Size/function count reflect the AudioTrack lifecycle + routing state machine kept in one place.
  */
+@Suppress("LargeClass", "TooManyFunctions")
 class DualStreamAudioManager(
     private val context: Context,
     private val logCallback: LogCallback,
@@ -171,7 +175,10 @@ class DualStreamAudioManager(
      * Per-purpose audio slot: owns AudioTrack + ring buffer + playback state.
      * Pre-allocated at init, one per stream purpose. Format may change if adapter
      * sends unexpected decode types (rare — triggers track recreation).
+     *
+     * Per-stream mutable state bundle (track, buffer, residuals, stats); grouped intentionally.
      */
+    @Suppress("LongParameterList")
     private class PurposeSlot(
         var format: AudioFormatConfig,
         val purpose: StreamPurpose,
@@ -278,7 +285,10 @@ class DualStreamAudioManager(
     /**
      * Check if audio data is zero-filled (adapter issue).
      * Real audio has dithering noise even during silence.
+     *
+     * Byte-pattern probe over sampled positions; the multi-term condition is the test.
      */
+    @Suppress("ComplexCondition")
     private fun isZeroFilledAudio(
         data: ByteArray,
         offset: Int,
@@ -311,7 +321,10 @@ class DualStreamAudioManager(
      * Detect nav end marker (solid 0xFFFF). Adapter sends before NaviStop.
      * Distinct from warmup noise (mixed 0xFFFF/0x0000/0xFEFF patterns).
      * When detected: flush buffers for clean next NaviStart.
+     *
+     * 0xFFFF end-marker probe; the multi-byte comparison is the test.
      */
+    @Suppress("ComplexCondition")
     private fun isNavEndMarker(
         data: ByteArray,
         offset: Int,
@@ -388,7 +401,11 @@ class DualStreamAudioManager(
         }
     }
 
-    /** Write audio to stream buffer (non-blocking, USB thread). Returns bytes written. */
+    /**
+     * Write audio to stream buffer (non-blocking, USB thread). Returns bytes written.
+     * Params are the wire fields of one audio frame; passed positionally on the hot USB thread.
+     */
+    @Suppress("LongParameterList")
     fun writeAudio(
         data: ByteArray,
         dataOffset: Int,
@@ -416,7 +433,11 @@ class DualStreamAudioManager(
         return written
     }
 
-    /** Body of [writeAudio] after the zero-packet filter: route to a slot/nav ring and enqueue. */
+    /**
+     * Body of [writeAudio] after the zero-packet filter: route to a slot/nav ring and enqueue.
+     * Routing state machine on the hot audio thread; branch/param count is intrinsic.
+     */
+    @Suppress("CyclomaticComplexMethod", "LongParameterList")
     private fun routeAndEnqueue(
         data: ByteArray,
         dataOffset: Int,
@@ -527,7 +548,11 @@ class DualStreamAudioManager(
         )
     }
 
-    /** Request AudioFocus for a stream purpose. */
+    /**
+     * Request AudioFocus for a stream purpose.
+     * AudioFocus/ducking transition table by purpose; branch count mirrors the states.
+     */
+    @Suppress("CyclomaticComplexMethod")
     fun onPurposeChanged(purpose: StreamPurpose) {
         synchronized(lock) {
             val gainType =
@@ -851,7 +876,10 @@ class DualStreamAudioManager(
      *
      * During transitions (e.g., SIRI_START sent but adapter still sending media PCM),
      * the format won't match the target purpose, so media PCM stays on the MEDIA track.
+     *
+     * Phone-call (8k/16k mono) vs media routing test; the multi-term condition is the rule.
      */
+    @Suppress("ComplexCondition")
     private fun resolveTargetSlot(
         format: AudioFormatConfig,
         state: AudioRoutingState,
@@ -1060,6 +1088,8 @@ class DualStreamAudioManager(
         }
     }
 
+    // Guarded AudioTrack teardown (stop/flush/release under null+state checks); nesting is the guards.
+    @Suppress("NestedBlockDepth")
     private fun releaseSlot(slot: PurposeSlot?) {
         slot ?: return
         try {
@@ -1080,6 +1110,8 @@ class DualStreamAudioManager(
         slot.track = null
     }
 
+    // Guarded nav-track teardown; nesting is the null/state guards around AudioTrack release.
+    @Suppress("NestedBlockDepth")
     private fun releaseNavTrack() {
         try {
             navTrack?.let { track ->
@@ -1124,6 +1156,9 @@ class DualStreamAudioManager(
         private var navResidualOffset = 0
         private var navResidualCount = 0
 
+        // Real-time playback loop: drains rings into AudioTrack with underrun/residual handling.
+        // Hardware-tuned, forbidden-to-refactor per brief; loop jumps/nesting are the pacing logic.
+        @Suppress("CyclomaticComplexMethod", "LongMethod", "NestedBlockDepth", "LoopWithTooManyJumpStatements")
         override fun run() {
             Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
             log("[AUDIO] Playback thread started with URGENT_AUDIO priority")

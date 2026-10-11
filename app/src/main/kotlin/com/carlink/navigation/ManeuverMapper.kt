@@ -74,7 +74,10 @@ object ManeuverMapper {
      * @param cpType CPManeuverType value (0-53)
      * @param turnSide 0=right-hand driving (default), 1=left-hand driving
      * @return Maneuver type constant
+     *
+     * CarPlay-type -> AAOS-maneuver mapping table expressed as a when; branch count = the table size.
      */
+    @Suppress("CyclomaticComplexMethod", "LongMethod")
     fun mapManeuverType(
         cpType: Int,
         turnSide: Int = 0,
@@ -375,7 +378,10 @@ object ManeuverMapper {
      *   the mapping doc §3/§5). Null ⇒ existing plain ENTER_AND_EXIT + exit number (no change).
      * @param composedIconKey [StableIconRegistry] key of [composedIcon]'s PNG, when the store
      *   registered one (stable-URI path on at compose time). Ignored without [composedIcon].
+     *
+     * Builds a Maneuver per CarPlay type; params are the icon/angle/context inputs, branches the table.
      */
+    @Suppress("CyclomaticComplexMethod", "LongMethod", "LongParameterList")
     fun buildManeuverForType(
         cpType: Int,
         turnSide: Int,

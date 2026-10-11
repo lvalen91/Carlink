@@ -28,3 +28,14 @@ naming:
   FunctionNaming:
     # @Composable functions are PascalCase by convention and are not naming violations.
     ignoreAnnotated: ['Composable']
+
+exceptions:
+  TooGenericExceptionCaught:
+    # Project-wide intentional pattern (~69 sites across 22 files). Every flagged catch sits on a
+    # platform/hardware boundary — AAOS Car API, MediaCodec/AudioTrack/AudioRecord, USB bulk I/O,
+    # ContentProvider, MediaSession — where a vendor/JNI call can throw anything and must NOT crash
+    # the head unit; each catch logs the exception and degrades gracefully (none are swallowed).
+    # Broad catch is the correct defensive contract here, so it is disabled once rather than
+    # scattered as 69 identical @Suppress annotations. Narrow, swallowed catches are still caught
+    # by the separate SwallowedException rule, which remains active.
+    active: false

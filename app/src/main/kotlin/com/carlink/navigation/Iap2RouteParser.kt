@@ -84,7 +84,10 @@ object Iap2RouteParser {
     /**
      * Parse a single 0x5202 maneuver frame starting at [offset].
      * Returns (parsed, bytesConsumed) or null on sync loss.
+     *
+     * Fixed-offset iAP2 maneuver-record decode; length/branches mirror the binary field layout.
      */
+    @Suppress("CyclomaticComplexMethod", "LongMethod")
     private fun parseOneManeuver(
         bytes: ByteArray,
         offset: Int,

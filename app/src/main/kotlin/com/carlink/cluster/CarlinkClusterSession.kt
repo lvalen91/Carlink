@@ -47,13 +47,13 @@ import kotlinx.coroutines.launch
  *   onGetTemplate() directly on the cluster display. This class targets that path — its
  *   [CarlinkClusterScreen] returns NavigationTemplate with RoutingInfo (maneuver, distance, road).
  *
- * TODO: Add platform-aware switch in [CarlinkClusterService] gated on
+ * Deferred: Add platform-aware switch in [CarlinkClusterService] gated on
  *   PlatformDetector.PlatformInfo.isGmAaos (already available). 2026-04-20 POTATO
  *   evidence shows GM's cluster is owned by VMSClusterService + OnStarTurnByTurnManager;
  *   the GM branch may end up being "return null / don't register" rather than
  *   "use ClusterMainSession" — NavigationManager.updateTrip() reaching GM's cluster is
  *   unverified.
- * TODO: Port primary/secondary multiplexing from [ClusterMainSession] to handle emulator
+ * Deferred: Port primary/secondary multiplexing from [ClusterMainSession] to handle emulator
  *   dual-session creation (DISPLAY_TYPE_MAIN + DISPLAY_TYPE_CLUSTER).
  */
 class CarlinkClusterSession : Session() {

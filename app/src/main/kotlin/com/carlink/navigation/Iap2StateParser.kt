@@ -91,7 +91,10 @@ object Iap2StateParser {
      * MUST treat null as "invalidate any cached state" — never preserve a stale prior
      * result across a parse failure, otherwise a corrupt frame would freeze the
      * authoritative cursor indefinitely.
+     *
+     * iAP2 TLV cursor parse; the all-null short-circuit and per-field decode drive the complexity.
      */
+    @Suppress("CyclomaticComplexMethod", "LongMethod", "ComplexCondition")
     fun parse(hex: String): Iap2RouteGuidanceState? {
         val b = hexToBytes(hex) ?: return null
         if (b.size < 7) return null
@@ -209,6 +212,9 @@ object Iap2StateParser {
         )
     }
 
+    // Malformed hex (odd length / non-hex digit) is an expected, non-exceptional input here;
+    // returning null is the contract. This is a pure stateless parser with no logging surface.
+    @Suppress("SwallowedException")
     private fun hexToBytes(hex: String): ByteArray? = try {
         if (hex.length % 2 != 0) {
             null

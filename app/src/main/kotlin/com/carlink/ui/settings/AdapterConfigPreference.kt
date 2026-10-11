@@ -279,8 +279,10 @@ data class VideoResolutionConfig(
  *
  * `@Suppress("StaticFieldLeak")` is safe because `appContext` below is always the application
  * context — no Activity/Fragment reference is held.
+ *
+ * Function count is the persisted adapter-config getter/setter surface (one accessor per field).
  */
-@Suppress("StaticFieldLeak")
+@Suppress("StaticFieldLeak", "TooManyFunctions")
 class AdapterConfigPreference private constructor(
     context: Context,
 ) {

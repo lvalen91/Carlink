@@ -46,7 +46,10 @@ import java.util.LinkedHashMap
  * Process scope: ContentProvider is a per-process singleton, so [iconCache] is
  * effectively process-global. Cache resets on app process death; Templates Host
  * then re-inserts on next icon use.
+ *
+ * ContentProvider shim; function count is the ContentProvider override set plus icon helpers.
  */
+@Suppress("TooManyFunctions")
 class ClusterIconShimProvider : ContentProvider() {
     companion object {
         private const val TAG = Logger.Tags.ICON_SHIM
@@ -218,6 +221,8 @@ class ClusterIconShimProvider : ContentProvider() {
         return pipeOut("stable/$key", outputData)
     }
 
+    // Scales only when all four target-dimension terms are valid; the condition is the gate.
+    @Suppress("ComplexCondition")
     private fun maybeScale(
         data: ByteArray,
         targetW: Int?,

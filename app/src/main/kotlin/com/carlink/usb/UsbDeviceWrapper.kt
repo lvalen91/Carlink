@@ -59,7 +59,10 @@ private const val INITIAL_RESPONSE_TIMEOUT_MS = 15_000L
  *   if the read thread is blocked in bulkTransfer, join times out and teardown
  *   proceeds while the call is still mid-flight. Android unsticks pending transfers
  *   by returning -1 on endpoint close, so it survives.
+ *
+ * USB bulk-transfer wrapper; function count is the open/claim/read/write/close device surface.
  */
+@Suppress("TooManyFunctions")
 class UsbDeviceWrapper(
     private val context: Context,
     private val usbManager: UsbManager,
@@ -382,7 +385,11 @@ class UsbDeviceWrapper(
      * @param callback Callback for received messages
      * @param timeout Read timeout in milliseconds
      * @param videoProcessor Optional processor for direct video data handling (bypasses message parsing)
+     *
+     * Hot USB bulk-read loop feeding the protocol pump; loop jumps and length are the framing/
+     * reconnect logic. Refactoring risks the read path.
      */
+    @Suppress("CyclomaticComplexMethod", "LongMethod", "LoopWithTooManyJumpStatements")
     fun startReadingLoop(
         callback: ReadingLoopCallback,
         timeout: Int = 30000,
@@ -711,6 +718,8 @@ class UsbDeviceWrapper(
     // the code claims the lowest-index one and ignores the rest. Known devices (per
     // KnownDevices in MessageTypes.kt) present exactly one matching interface, so
     // this is safe today.
+    // Nesting is the interface/endpoint enumeration guards during bulk-interface claim.
+    @Suppress("NestedBlockDepth")
     private fun claimBulkInterface(): Boolean {
         for (i in 0 until device.interfaceCount) {
             val iface = device.getInterface(i)

@@ -14,7 +14,11 @@ import java.nio.charset.StandardCharsets
  *
  * Parses binary messages received from the Carlinkit adapter into typed message objects.
  * Handles header validation, payload extraction, and type-specific parsing.
+ *
+ * Wire-protocol parser; forbidden-to-refactor per brief. Function count = one parse routine per
+ * message type, kept together as the decode surface.
  */
+@Suppress("TooManyFunctions")
 object MessageParser {
     /**
      * Parse a 16-byte header from raw bytes.
@@ -22,7 +26,10 @@ object MessageParser {
      * @param data Raw header bytes (must be exactly 16 bytes)
      * @return Parsed MessageHeader
      * @throws HeaderParseException if header is invalid
+     *
+     * Each throw rejects a distinct malformed-header case; throws are the validation contract.
      */
+    @Suppress("ThrowsCount")
     fun parseHeader(data: ByteArray): MessageHeader {
         if (data.size != HEADER_SIZE) {
             throw HeaderParseException("Invalid buffer size - Expecting $HEADER_SIZE, got ${data.size}")
@@ -61,7 +68,10 @@ object MessageParser {
      * @param header Parsed message header
      * @param payload Message payload bytes (can be null for some message types)
      * @return Parsed Message object
+     *
+     * Dispatch by message type to the per-type parser; the switch IS the protocol.
      */
+    @Suppress("CyclomaticComplexMethod")
     fun parseMessage(
         header: MessageHeader,
         payload: ByteArray?,
@@ -196,6 +206,8 @@ object MessageParser {
         return ByteBuffer.wrap(payload, 0, safe).order(ByteOrder.LITTLE_ENDIAN)
     }
 
+    // Fixed byte-offset decode of the audio frame; length reflects the field layout.
+    @Suppress("LongMethod")
     private fun parseAudioData(
         header: MessageHeader,
         payload: ByteArray?,
@@ -272,6 +284,8 @@ object MessageParser {
         }
     }
 
+    // Variable-field media-data decode; branches/nesting mirror the optional-field layout.
+    @Suppress("CyclomaticComplexMethod", "LongMethod", "NestedBlockDepth")
     private fun parseMediaData(
         header: MessageHeader,
         payload: ByteArray?,
@@ -637,7 +651,10 @@ class UnpluggedMessage(
 
 /**
  * Audio data message with PCM samples or command.
+ *
+ * Immutable decoded-frame value type; params are the wire fields of the audio message.
  */
+@Suppress("LongParameterList")
 class AudioDataMessage(
     header: MessageHeader,
     val decodeType: Int,

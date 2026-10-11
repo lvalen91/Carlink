@@ -1,3 +1,7 @@
+// Logging facade: the top-level level-helpers (logInfo/logWarn/...) and the Logger object's
+// tag/level API are a deliberately broad, cohesive surface used app-wide.
+@file:Suppress("TooManyFunctions")
+
 package com.carlink.logging
 
 import android.util.Log
@@ -268,6 +272,9 @@ object Logger {
         throwable: Throwable? = null,
     ) = log(Level.ERROR, tag, message, throwable)
 
+    // Central log sink: dispatches by level and routes to logcat + file listeners; branch count
+    // is the level/tag/listener fan-out.
+    @Suppress("CyclomaticComplexMethod")
     fun log(
         level: Level,
         tag: String?,

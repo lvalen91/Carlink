@@ -93,7 +93,10 @@ import java.util.Locale
  *    11th LogPreset silently drops it (no exhaustiveness check). Fix: drive from
  *    LogPreset.entries.chunked(5) or similar.
  *  - formatBytes vs formatFileSize are inconsistent (L938 vs L945) — see their docs.
+ *
+ * Compose tab: log list + level/preset/export controls; branches/length are declarative UI.
  */
+@Suppress("CyclomaticComplexMethod", "LongMethod")
 @Composable
 internal fun LogsTabContent(
     context: android.content.Context,
@@ -655,7 +658,10 @@ internal fun LogsTabContent(
  * fail; two hardcoded lists will not). Fix: drive the grid from
  * `LogPreset.entries.chunked(5)` (or chunked(ceil(n/2))) so new presets are
  * picked up automatically.
+ *
+ * Compose dialog; length is declarative UI layout.
  */
+@Suppress("LongMethod")
 @Composable
 private fun LogLevelSelectorDialog(
     currentLevel: LogPreset,
@@ -763,7 +769,10 @@ private fun LogLevelSelectorDialog(
 /**
  * Single selectable chip inside [LogLevelSelectorDialog].
  * Displays the preset's display name, description, and color-coded selection state.
+ *
+ * Compose chip; length is declarative UI layout.
  */
+@Suppress("LongMethod")
 @Composable
 private fun LogPresetChip(
     preset: LogPreset,
@@ -891,7 +900,10 @@ private fun LoggingControlCard(
  * Single row in the Log Files list. Shows filename, size + last-modified timestamp,
  * and export/delete icon buttons. `isExportEnabled` is the soft gate driven by
  * the parent's `isExporting` flag — see race note at the call site.
+ *
+ * Compose list item; length is declarative UI layout.
  */
+@Suppress("LongMethod")
 @Composable
 private fun LogFileItem(
     file: File,

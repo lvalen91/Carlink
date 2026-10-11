@@ -21,6 +21,8 @@ import kotlin.math.sin
 internal object ManeuverComposer {
     const val VIEWPORT = 56.0f
 
+    // Selects/composes a maneuver icon by type; branch count = the icon-selection table.
+    @Suppress("CyclomaticComplexMethod")
     fun compose(data: Iap2ManeuverData): ComposedIcon {
         val cp = data.cpManeuverType
         return when (cp) {

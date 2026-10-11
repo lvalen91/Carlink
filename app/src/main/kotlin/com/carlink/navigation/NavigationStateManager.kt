@@ -263,6 +263,8 @@ object NavigationStateManager {
         }
     }
 
+    // Maps AA order type + turn side + roundabout exit to CarPlay maneuver type; lookup table as code.
+    @Suppress("CyclomaticComplexMethod")
     private fun orderTypeToCpManeuverType(orderType: Int, turnSide: Int, roundaboutExit: Int): Int {
         // Firmware bug: the AA NaviOrderType lookup table is lossy — several roundabout
         // maneuvers collapse to orderType=16 (STRAIGHT) or other non-roundabout types.
@@ -306,7 +308,11 @@ object NavigationStateManager {
      * Process an incoming NaviJSON payload (incremental update).
      *
      * @param payload Parsed JSON fields from MEDIA_DATA subtype 200
+     *
+     * Merges iAP2 route-guidance JSON into navigation state; many optional fields and the
+     * index-reconciliation conditions make the branch/term count intrinsic to the data.
      */
+    @Suppress("CyclomaticComplexMethod", "LongMethod", "ComplexCondition")
     fun onNaviJson(payload: Map<String, Any>) {
         if (payload.isEmpty()) {
             logNavi { "[NAVI] Empty NaviJSON payload received — ignoring" }

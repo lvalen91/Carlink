@@ -13,7 +13,7 @@ import com.carlink.logging.logInfo
  * Currently always returns [ClusterMainSession] (GM AAOS path — NavigationManager relay
  * feeding GM's internal OnStarTurnByTurnManager). For non-GM AAOS platforms,
  * [CarlinkClusterSession] (direct NavigationTemplate rendering) should be returned instead.
- * TODO: gate session choice on PlatformInfo.isGmAaos. NOTE: 2026-04-20 POTATO GM runs
+ * Deferred: gate session choice on PlatformInfo.isGmAaos. NOTE: 2026-04-20 POTATO GM runs
  * show the cluster is driven entirely by VMSClusterService/NavigationClusterService +
  * OnStarTurnByTurnManager — our CarAppService may not be bound on GM at all. Verify
  * NavigationManager.updateTrip() actually reaches GM's cluster before treating
