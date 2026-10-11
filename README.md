@@ -84,6 +84,10 @@ Full explanations in **[app notes](documents/reference/app-notes.md)**:
   [Details](documents/reference/app-notes.md#gm-vcu-platform-bosch-vcunh1)
 - **HUD** is untested (author's truck has none); some Silverado/Hummer EV users report nav shows.
   [Details](documents/reference/app-notes.md#heads-up-display-hud)
+- **"Not Supported" USB toast on GM AAOS 14+** — GM's USB admission code only recognizes a
+  fixed set of device types; the adapter's working mode isn't one of them, which is why the
+  old Carlinkit UDisk toggle was a workaround.
+  [Details](documents/reference/app-notes.md#not-supported-usb-toast-on-gm-aaos-14)
 
 ## Custom adapter firmware
 

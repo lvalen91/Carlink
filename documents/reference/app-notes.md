@@ -88,6 +88,27 @@ The author's truck has no HUD and cannot test it. Some Silverado and Hummer EV u
 the HUD does show navigation. Testing is limited to the author's Silverado software; GM and
 others can change how the HUD is driven, so behavior is not guaranteed.
 
+## "Not Supported" USB toast on GM AAOS 14+
+
+GM AAOS 14+ radios (e.g. VCUUM-platform VCU units) show an **"Unsupported device"** toast for
+the adapter and never let an app claim it, unless the adapter's USB identity has already been
+seen as a device type GM's USB admission code recognizes. This is host-OS filtering, not an
+adapter fault, and it's why the old Carlinkit **UDisk mode** toggle worked around it.
+
+GM's `UsbHostManager` only admits a fixed set of device types (mass storage, MTP/phone-tablet,
+ADB, Android Auto, hubs). The adapter's actual working mode isn't on that list, so on first
+attach with an unrecognized serial number, GM shows the toast and never offers the device to
+any app. It does, however, remember the serial number of any device it just admitted when that
+device is removed, and will silently re-admit a reconnecting device — skipping the toast — if
+the same serial number comes back attached to a recognized class/type.
+
+**Why UDisk mode fixed it:** the adapter's serial number is shared across units. Toggling UDisk
+mode makes the adapter re-enumerate as mass storage — a recognized type — so GM admits it and
+remembers that serial when the storage device is removed. Toggling UDisk back off re-enumerates
+the *same serial* into the real protocol mode; GM recognizes it as a reconnect of an
+already-known serial and lets it through without the toast, so an app can prompt the user to
+claim it.
+
 ## Custom adapter firmware
 
 Adapter-side binaries were patched to correct two problems and require custom firmware on
