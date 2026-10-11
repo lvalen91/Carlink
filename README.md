@@ -17,9 +17,46 @@ on GitHub or the forum.
 Work in progress — something is always changing. Updates that ship without code changes are
 usually new documentation or corrections.
 
-Target and only tested platform: a 2024 Silverado **gminfo3.7** Intel AAOS radio, with an
-iPhone as the primary device (CarPlay is the most tuned). Everything else is **untested**.
-See [Testing scope](documents/reference/app-notes.md#testing-scope--hardware).
+Target and only hardware-tested platform: a 2024 Silverado **gminfo3.7** Intel AAOS radio,
+with an iPhone as the primary device (CarPlay is the most tuned). Some simulated testing was
+also done on a GM emulator running **GM AAOS 14 (VCUUM platform, build 470.3)**. Everything
+else is **untested**. See [Testing scope](documents/reference/app-notes.md#testing-scope--hardware).
+
+## Installing
+
+How you install depends on whether your head unit gives you ADB access.
+
+### GM production vehicles (no ADB)
+
+GM's shipping radios expose **no ADB** and run only apps delivered through Google Play. There
+is no public Play listing for this app, so each user installs it through **their own Google
+Play Developer Account**:
+
+1. Enroll in the [Google Play Console](https://play.google.com/console/) (one-time US$25 fee).
+2. Give the app a package name you own — change `ownerApplicationId` in `app/build.gradle.kts`
+   (a fork must not reuse `zeno.carlink`), then build the `play` bundle (AAB).
+3. Create an app in the Console and upload that bundle to an **Internal Testing** track.
+4. Add your own Google account as an internal tester, accept the opt-in link, then install from
+   the Play Store **on the head unit** while signed into that account.
+
+The build is signed with **your** upload key/certificate, not the author's — that is expected
+and required. If you are new to the Play Console, search for a current "upload an app to an
+Internal Testing track" tutorial; the process is standard Android publishing and not specific
+to this app.
+
+### AAOS platforms with ADB access
+
+If your platform exposes ADB, install the APK with the installer attributed to the Play Store:
+
+```
+adb install -i com.android.vending app-sideload-release.apk
+```
+
+The `-i com.android.vending` flag records Google Play as the installing package. AAOS considers
+the install source when deciding what may run while driving, so attributing the install to Play
+makes the system honor the app's **Distraction Optimization** declarations — showing and running
+it normally — instead of treating a plain sideload as non-optimized and restricting it. A signed
+`sideload` APK is attached to each [GitHub Release](../../releases), or you can build one yourself.
 
 ## Key limitations
 
@@ -84,22 +121,35 @@ log levels narrow troubleshooting to the area you need:
 
 ## Documentation
 
-Most questions are answered in the collected reference docs — the most detailed, centralized
-source short of the adapter/GM source itself:
+The app is **self-contained** — this repo builds and runs on its own. The docs in this repo
+are the primary reference:
 
-- [App behavior, limitations & design notes](documents/reference/app-notes.md)
-- [Reference docs index](documents/reference/)
-- [Adapter (CPC200-CCPA) resources](https://github.com/lvalen91/CPC200-CCPA_resources)
-- [gminfo resources](https://github.com/lvalen91/gminfo_resources)
+| Topic | Where | What it is |
+|---|---|---|
+| App behavior, limitations & design notes | [documents/reference/app-notes.md](documents/reference/app-notes.md) | The detail behind this README |
+| Reference docs index | [documents/reference/](documents/reference/) | Emulator, cluster, and platform notes |
 
-Accuracy isn't guaranteed, but it's thorough. If you have direct adapter/GM-radio source,
-there's a site that will gladly publish it anonymously.
+Accuracy isn't guaranteed, but it's the most detailed, centralized source short of the
+adapter/GM source itself. If you have direct adapter/GM-radio source, there's a site that
+will gladly publish it anonymously.
+
+## Supporting & reference material
+
+Separate repos — **not dependencies of this app** — that back the research behind it or
+provide background:
+
+| Repo | What it is |
+|---|---|
+| [CPC200-CCPA_resources](https://github.com/lvalen91/CPC200-CCPA_resources) | Work on the Carlinkit CPC200-CCPA adapter (firmware, reverse engineering) |
+| [gminfo_resources](https://github.com/lvalen91/gminfo_resources) | GM head-unit / gminfo3.7 AAOS platform reference |
+| [carlink_flutter](https://github.com/lvalen91/carlink_flutter) | The original Flutter app this one reimplements |
+| [XDA Forums thread](https://xdaforums.com/t/carlink.4774308/) | Discussion and support; report issues here or on GitHub |
 
 ## Credits
 
-The repos that started this and provided insight, inspiration, and a lot of help:
+Projects that started this and provided insight, inspiration, and a lot of help:
 
-- [Carplay by abuharsky](https://github.com/abuharsky/carplay) — original Android implementation
+- [carplay by abuharsky](https://github.com/abuharsky/carplay) — original Android implementation
 - [node-CarPlay by rhysmorgan134](https://github.com/rhysmorgan134/node-CarPlay) — protocol reverse engineering
 - [LIVI by f-io](https://github.com/f-io/LIVI) — Linux (Raspberry Pi) and macOS implementation
 - [pycarplay by electric-monk](https://github.com/electric-monk/pycarplay) — Python implementation

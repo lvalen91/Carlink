@@ -116,6 +116,8 @@ Before reporting audio issues:
 ## Testing scope & hardware
 
 - Target platform and only test hardware: a 2024 Silverado **gminfo3.7** Intel AAOS radio.
+- Some simulated testing was also done on a GM emulator running **GM AAOS 14 (VCUUM
+  platform, build 470.3)**.
 - The primary phone is an **iPhone**, so CarPlay has the most tuning and testing. A Google
   Pixel 10 is used for basic Android Auto functionality, not real-world day-to-day testing.
 - Optimized for video and audio performance on gminfo3.7. Compatibility on anything else is

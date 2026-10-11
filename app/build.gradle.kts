@@ -24,8 +24,12 @@ android {
         applicationId = ownerApplicationId
         minSdk = 29
         targetSdk = 36
-        versionCode = 157
-        versionName = "1.0.0"
+        // versionCode is the single source of truth (Play requires a monotonic integer;
+        // it also matches the revisions.txt [NNN] entry and the release tag vNNN).
+        // versionName is DERIVED so the two can never drift: 157 -> "1.57", 207 -> "2.07".
+        val appVersionCode = 157
+        versionCode = appVersionCode
+        versionName = "%d.%02d".format(appVersionCode / 100, appVersionCode % 100)
 
 //###############################################
 //###############################################
@@ -38,6 +42,23 @@ android {
         }
     }
 
+    // Release signing is driven entirely by environment variables, set by CI from GitHub
+    // Secrets (the workflow base64-decodes the keystore to a file first). Nothing secret
+    // lives in the repo — .gitignore already excludes *.jks/*.keystore/key.properties.
+    // When the env is absent (normal local build) the release stays UNSIGNED and the build
+    // still succeeds; CI is the signing authority for distributed APKs.
+    val releaseKeystoreFile: String? = System.getenv("CARLINK_KEYSTORE_FILE")
+    signingConfigs {
+        create("release") {
+            if (releaseKeystoreFile != null) {
+                storeFile = file(releaseKeystoreFile)
+                storePassword = System.getenv("CARLINK_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("CARLINK_KEY_ALIAS")
+                keyPassword = System.getenv("CARLINK_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
@@ -46,6 +67,12 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            // Apply the release signing config only when the keystore env is present (CI).
+            // Otherwise leave it unset so local release builds produce an unsigned APK
+            // instead of failing on a missing keystore.
+            if (releaseKeystoreFile != null) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
