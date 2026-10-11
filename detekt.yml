@@ -1,0 +1,30 @@
+# Tuned detekt overrides, layered on detekt's default ruleset
+# (buildUponDefaultConfig = true in app/build.gradle.kts). Only the deltas live here; every
+# other rule keeps its detekt 1.23.x default. detekt runs non-blocking (ignoreFailures = true)
+# — this config exists to make the output ACTIONABLE, not to zero it out: it silences pure
+# style/domain noise so the structural findings (complexity, exceptions, naming) stand out.
+#
+# Pinned to the repo's detekt 1.23.8, so it resolves identically on every workstation; that is
+# why it is committed rather than per-machine. If a future detekt bump rejects a key here, fix
+# the key — the build.gradle guard also tolerates this file being absent (falls back to the
+# default ruleset), so deleting it never breaks a build.
+
+style:
+  MagicNumber:
+    # Protocol / codec / firmware code: hex message ids, buffer sizes, sample rates, bitmasks.
+    # Literal numbers ARE the domain here, not a smell. (~1570 findings, the bulk of the noise.)
+    active: false
+  MaxLineLength:
+    # Line length is a formatting concern (ktlint's domain); long log/format strings are
+    # deliberate. Not worth duplicating as a detekt finding. (~432 findings.)
+    active: false
+  ReturnCount:
+    # Guard-clause-heavy parsers and protocol state machines read fine with several early
+    # returns; default max of 2 is too strict for this code.
+    active: true
+    max: 6
+
+naming:
+  FunctionNaming:
+    # @Composable functions are PascalCase by convention and are not naming violations.
+    ignoreAnnotated: ['Composable']
