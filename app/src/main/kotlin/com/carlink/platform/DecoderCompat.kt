@@ -3,6 +3,7 @@ package com.carlink.platform
 import android.graphics.SurfaceTexture
 import android.media.MediaCodec
 import android.media.MediaFormat
+import android.os.Handler
 import android.os.SystemClock
 import android.view.Surface
 import com.carlink.logging.Logger
@@ -38,8 +39,10 @@ import java.io.IOException
  *   `ERROR_INSUFFICIENT_RESOURCE`, `ERROR_RECLAIMED`, codec creation failure) abort the search
  *   and return the input UNCACHED. A busy codec at ignition boot must not shrink the stream
  *   for the rest of the process lifetime.
- * - A wall-clock deadline bounds the main-thread cost. On expiry the input is returned
- *   uncached.
+ * - A wall-clock deadline, checked between probes, bounds the total search. On expiry the
+ *   input is returned uncached. It cannot interrupt a probe already in progress, so callers
+ *   on the main thread use [adjustAsync], which probes on its own thread and falls back to
+ *   the input after [ASYNC_TIMEOUT_MS].
  * - Only a confirmed native-size pass or a confirmed shrink is memoized per (codec, size).
  *
  * A device whose decoder starts at the display size pays one create/configure/start/release
@@ -71,7 +74,90 @@ object DecoderCompat {
         ABORT,
     }
 
+    /**
+     * How long [adjustAsync] waits for the probe thread before delivering the input unchanged.
+     * [DEADLINE_MS] is only checked between probes, so one slow probe can overrun it; this
+     * leaves room for that while bounding how long startup waits on a wedged decoder.
+     */
+    internal const val ASYNC_TIMEOUT_MS = 2_000L
+
     private val cache = mutableMapOf<String, Pair<Int, Int>>()
+
+    /**
+     * Last probe thread [adjustAsync] gave up on. While it is still alive it holds this
+     * object's monitor inside a stuck codec call, so a new probe thread would only block
+     * behind it; later calls skip probing instead of piling up blocked threads.
+     */
+    @Volatile
+    private var abandonedProbe: Thread? = null
+
+    /**
+     * Runs [adjust] on a dedicated thread and delivers the result on [handler]'s thread,
+     * exactly once.
+     *
+     * The probe is a chain of synchronous binder calls into the vendor codec HAL and cannot be
+     * interrupted, so it must not run on the main thread: a single stuck call there blocks
+     * input dispatch and window-focus handling until the system declares an ANR. If the thread
+     * has not answered within [timeoutMs], [onResult] receives the input unchanged (the same
+     * outcome as an inconclusive probe, nothing cached) and the thread is abandoned, not
+     * joined. A confirmed result it produces later is still memoized by [adjust] and used by
+     * the next call.
+     */
+    fun adjustAsync(
+        width: Int,
+        height: Int,
+        decoderName: String?,
+        handler: Handler,
+        timeoutMs: Long = ASYNC_TIMEOUT_MS,
+        onResult: (Pair<Int, Int>) -> Unit,
+    ) {
+        val input = width to height
+        val stuck = abandonedProbe
+        if (stuck != null && stuck.isAlive) {
+            logWarn(
+                "[DECODER_PROBE] Earlier probe thread still blocked in the codec; " +
+                    "leaving ${width}x$height unchanged without probing",
+                TAG,
+            )
+            handler.post { onResult(input) }
+            return
+        }
+
+        // Only touched on the handler's thread, so the two deliveries below are serialized.
+        var delivered = false
+        val worker =
+            Thread(
+                {
+                    val result =
+                        try {
+                            adjust(width, height, decoderName)
+                        } catch (t: Throwable) {
+                            logWarn("[DECODER_PROBE] Probe thread failed: ${t.javaClass.simpleName}", TAG)
+                            input
+                        }
+                    handler.post {
+                        if (!delivered) {
+                            delivered = true
+                            onResult(result)
+                        }
+                    }
+                },
+                "DecoderProbe",
+            ).apply { isDaemon = true }
+        handler.postDelayed({
+            if (!delivered) {
+                delivered = true
+                abandonedProbe = worker
+                logWarn(
+                    "[DECODER_PROBE] No answer within $timeoutMs ms; leaving ${width}x$height " +
+                        "unchanged and abandoning the probe thread",
+                    TAG,
+                )
+                onResult(input)
+            }
+        }, timeoutMs)
+        worker.start()
+    }
 
     /**
      * Returns [width] x [height] when [decoderName] (or the platform default AVC decoder when

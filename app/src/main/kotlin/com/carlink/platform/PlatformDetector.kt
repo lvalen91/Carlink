@@ -23,12 +23,23 @@ import com.carlink.util.WindowMetricsCompat
  * - AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE: Native audio sample rate
  *
  * USAGE:
- * Call detect(context) during video/audio subsystem initialization. PlatformInfo is
- * NOT cached at this layer — every call re-runs all detection steps. CarlinkManager
+ * Call detect(context) during video/audio subsystem initialization. CarlinkManager
  * stores the returned PlatformInfo locally and forwards it to AudioConfig.forPlatform;
  * the cluster platform-switch TODO in CarlinkClusterService also plans to consume
- * PlatformInfo.isGmAaos from here. Re-detection on display-mode reinit is redundant
- * but cheap (Build properties + one MediaCodecList scan).
+ * PlatformInfo.isGmAaos from here.
+ *
+ * CACHING (2026-10-11): detect() is called from ~8 sites per process (MainActivity,
+ * CarlinkManager init/initialize/start, AdapterConfigPreference, DisplayModePreference).
+ * The context-independent, process-static results are computed once and reused:
+ * - hardware H.264 decoder (MediaCodecList scan) — cached after the first scan that does
+ *   not throw; a scan that throws is NOT cached, so a transient media.codec failure is
+ *   retried on the next call instead of pinning "software" for the process lifetime.
+ * - native output sample rate (an audioserver binder call) — cached once AudioManager
+ *   reports a value; a null/failed read falls back to 48000 for that call only.
+ * - Build.* fields are plain static reads and are re-read per call (no cost).
+ * Display width/height depend on the passed Context (an Activity window vs the app
+ * context, and the current display mode), so they are re-measured on every call and
+ * never cached. No caller currently reads them (see [PlatformInfo.displayWidth]).
  *
  * Log output uses android.util.Log directly rather than the project Logger — this
  * class runs before the Logger is fully wired and any failure here should not
@@ -173,9 +184,9 @@ object PlatformDetector {
         val buildId = Build.ID ?: ""
 
         val isGmAaos = detectGmAaos(manufacturer, product, device)
-        val (_, hardwareH264DecoderName) = detectHardwareH264Decoder()
+        val hardwareH264DecoderName = cachedHardwareH264DecoderName()
         val hasIntelCodec = hardwareH264DecoderName?.contains("Intel", ignoreCase = true) == true
-        val nativeSampleRate = detectNativeSampleRate(context)
+        val nativeSampleRate = cachedNativeSampleRate(context)
 
         // Detect Intel Broxton/Apollo Lake platform (used in gminfo37)
         // Broxton uses Intel Atom x7 (Apollo Lake) with HD Graphics 505
@@ -269,57 +280,115 @@ object PlatformDetector {
             product.contains("gminfo", ignoreCase = true) ||
             device.startsWith("gminfo", ignoreCase = true)
 
+    // Process-level cache for the context-independent detection steps (see class KDoc).
+    private class DecoderScan(
+        val name: String?,
+    )
+
+    private val decoderScanLock = Any()
+
+    @Volatile private var decoderScan: DecoderScan? = null
+
+    @Volatile private var nativeSampleRateCache = 0 // 0 = not yet read successfully
+
+    /**
+     * The decoder scan the cache wraps. Swappable for unit tests only, so they can count
+     * how often the expensive step actually runs; production never reassigns it.
+     */
+    @Volatile internal var hardwareH264DecoderScanner: () -> String? = ::scanHardwareH264Decoder
+
+    /** Test-only: forget cached results so the next detect() re-runs every step. */
+    internal fun clearCacheForTesting() {
+        synchronized(decoderScanLock) {
+            decoderScan = null
+            nativeSampleRateCache = 0
+        }
+    }
+
+    /**
+     * Hardware H.264 decoder name, scanned at most once per process. Double-checked under
+     * [decoderScanLock] so concurrent first callers (main-thread onCreate and an IO-thread
+     * CarlinkManager.start) run one scan between them rather than one each.
+     */
+    private fun cachedHardwareH264DecoderName(): String? {
+        decoderScan?.let { return it.name }
+        synchronized(decoderScanLock) {
+            decoderScan?.let { return it.name }
+            return try {
+                val name = hardwareH264DecoderScanner()
+                decoderScan = DecoderScan(name)
+                name
+            } catch (e: Exception) {
+                // Not cached: a throw here (e.g. media.codec restarting) is transient, and
+                // caching it would pin software decode for the life of the process.
+                if (BuildConfig.DEBUG) Log.w(TAG, "Failed to detect hardware codec: ${e.message}")
+                null
+            }
+        }
+    }
+
     /**
      * Detect the best available hardware H.264 decoder.
      *
      * Uses MediaCodecList.REGULAR_CODECS — deliberately excludes ALL_CODECS, since
      * vendor-specific non-regular decoders are rarely suitable for real-time video
      * playback without additional tuning. If no hardware decoder is surfaced as
-     * REGULAR the method returns (false, null) and the app falls back to software.
+     * REGULAR the method returns null and the app falls back to software.
      *
-     * @return Pair of (isHardwareDecoder, codecName)
+     * Throws on MediaCodecList failure; [cachedHardwareH264DecoderName] catches and
+     * declines to cache that outcome.
+     *
+     * @return the hardware decoder's codec name, or null if none is available
      */
-    private fun detectHardwareH264Decoder(): Pair<Boolean, String?> =
-        try {
-            val codecList = MediaCodecList(MediaCodecList.REGULAR_CODECS)
-            val hwDecoder =
-                codecList.codecInfos.firstOrNull { info ->
-                    !info.isEncoder &&
-                        info.isHardwareAccelerated &&
-                        info.supportedTypes.any { type ->
-                            type.equals("video/avc", ignoreCase = true)
-                        }
-                }
-            if (hwDecoder != null) {
-                if (BuildConfig.DEBUG) Log.i(TAG, "[PLATFORM] Found hardware H.264 decoder: ${hwDecoder.name}")
-                Pair(true, hwDecoder.name)
-            } else {
-                if (BuildConfig.DEBUG) Log.i(TAG, "[PLATFORM] No hardware H.264 decoder found")
-                Pair(false, null)
+    private fun scanHardwareH264Decoder(): String? {
+        val codecList = MediaCodecList(MediaCodecList.REGULAR_CODECS)
+        val hwDecoder =
+            codecList.codecInfos.firstOrNull { info ->
+                !info.isEncoder &&
+                    info.isHardwareAccelerated &&
+                    info.supportedTypes.any { type ->
+                        type.equals("video/avc", ignoreCase = true)
+                    }
             }
-        } catch (e: Exception) {
-            if (BuildConfig.DEBUG) Log.w(TAG, "Failed to detect hardware codec: ${e.message}")
-            Pair(false, null)
+        if (BuildConfig.DEBUG) {
+            if (hwDecoder != null) {
+                Log.i(TAG, "[PLATFORM] Found hardware H.264 decoder: ${hwDecoder.name}")
+            } else {
+                Log.i(TAG, "[PLATFORM] No hardware H.264 decoder found")
+            }
         }
+        return hwDecoder?.name
+    }
+
+    /** Native output sample rate, cached after the first successful read. */
+    private fun cachedNativeSampleRate(context: Context): Int {
+        val cached = nativeSampleRateCache
+        if (cached > 0) return cached
+        val rate = detectNativeSampleRate(context) ?: return DEFAULT_SAMPLE_RATE
+        nativeSampleRateCache = rate
+        return rate
+    }
 
     /**
      * Detect native audio output sample rate.
      *
      * Uses AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE to get the optimal output rate.
-     * Falls back to 48000 Hz (common automotive rate) if detection fails.
+     * Returns null if detection fails (AudioManager reports null when audioserver returns
+     * no primary-output rate); [cachedNativeSampleRate] then falls back to 48000 Hz
+     * (common automotive rate) for that call without caching the fallback.
      *
      * Reference: https://developer.android.com/reference/android/media/AudioManager#PROPERTY_OUTPUT_SAMPLE_RATE
      */
-    private fun detectNativeSampleRate(context: Context): Int =
+    private fun detectNativeSampleRate(context: Context): Int? =
         try {
             val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
             audioManager
                 ?.getProperty(AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE)
                 ?.toIntOrNull()
-                ?: DEFAULT_SAMPLE_RATE
+                ?.takeIf { it > 0 }
         } catch (e: Exception) {
             if (BuildConfig.DEBUG) Log.w(TAG, "Failed to detect native sample rate: ${e.message}")
-            DEFAULT_SAMPLE_RATE
+            null
         }
 
     private const val DEFAULT_SAMPLE_RATE = 48000

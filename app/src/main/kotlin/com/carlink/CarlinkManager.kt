@@ -62,6 +62,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.util.Timer
@@ -157,6 +159,17 @@ class CarlinkManager(
     private var config: AdapterConfig = initialConfig
 
     companion object {
+        /**
+         * Serializes [start] across ALL CarlinkManager instances in the process. Two starts on
+         * one instance (MainScreen first-composition + onNewIntent + reconnect/restart) would
+         * each open the adapter and the second would overwrite — and leak — the first's live
+         * AdapterDriver. Process-wide rather than per-instance because a released manager's
+         * in-flight start keeps the USB interface claimed until its abort teardown finishes;
+         * the replacement manager's start must not open the adapter before that.
+         * A Mutex (not a monitor) because start() suspends in findDevice/openWithPermission.
+         */
+        private val startMutex = Mutex()
+
         private const val USB_WAIT_PERIOD_MS = 3000L
         private const val PAIR_TIMEOUT_MS = 15000L
 
@@ -340,6 +353,30 @@ class CarlinkManager(
     // USB
     private val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
     private var usbDevice: UsbDeviceWrapper? = null
+
+    // ---- start()/stop()/release() guard ----
+    // start() runs on Dispatchers.IO and spends seconds building a session (findDevice,
+    // permission, 200 ms settle, AdapterDriver.start's paced init sequence), while stop(),
+    // release(), rebootAdapter() and handleError() can run on the main or USB read thread.
+    // Without a guard, stop() during that window found no driver yet (or raced
+    // AdapterDriver.start against AdapterDriver.stop, leaking the heartbeat timer and read
+    // loop), and start() then left a live AdapterDriver on a stopped/released manager.
+    //
+    // Rule: while [setupInFlight], start() OWNS adapterDriver/usbDevice. Anyone else who wants
+    // the session torn down records [setupAbort] instead of touching them, and start() tears
+    // down what it built when its setup ends (finishSetup). Outside setup, teardown paths
+    // detach both fields atomically so concurrent teardowns never stop/close the same objects.
+    // The lock is only ever held for short non-suspending sections, never across USB init.
+    private val lifecycleLock = Any()
+
+    /** Set once by [release] (under [lifecycleLock]); read unlocked as a fast gate. */
+    @Volatile private var released = false
+
+    private var setupInFlight = false // guarded by lifecycleLock
+    private var setupAbort = SetupAbort.NONE // guarded by lifecycleLock
+
+    /** Teardown requested while start() owned the session; higher ordinal wins on merge. */
+    private enum class SetupAbort { NONE, HARD, GRACEFUL, GRACEFUL_REBOOT }
 
     // Wake lock to prevent CPU sleep during USB streaming
     // PARTIAL_WAKE_LOCK keeps CPU running but allows screen to turn off
@@ -874,9 +911,28 @@ class CarlinkManager(
      *   so it is safe to invoke repeatedly (e.g. after a user "reconnect" tap).
      *
      * Connection/handshake state machine; sequential, idempotent startup path.
+     *
+     * Concurrency: serialized process-wide by [startMutex]. A [stop]/[release]/
+     * [rebootAdapter]/[handleError] that lands while setup is in flight does not touch the
+     * half-built session; start() aborts at its next checkpoint and tears down what it built
+     * (see [finishSetup]). After [release], start() is a no-op.
      */
-    @Suppress("CyclomaticComplexMethod", "LongMethod")
     suspend fun start() {
+        startMutex.withLock {
+            if (released) {
+                logWarn("[LIFECYCLE] start() ignored — manager already released", tag = Logger.Tags.ADAPTR)
+                return
+            }
+            try {
+                startSession()
+            } finally {
+                finishSetup()
+            }
+        }
+    }
+
+    @Suppress("CyclomaticComplexMethod", "LongMethod")
+    private suspend fun startSession() {
         // Guard: Ensure H264Renderer is initialized before starting connection
         // This prevents video data from being discarded when app starts via MediaBrowserService
         // before MainActivity/Surface is ready
@@ -894,30 +950,45 @@ class CarlinkManager(
             stop()
         }
 
-        setState(State.CONNECTING)
-        setStatusText("Searching for adapter...")
-        resetUnknownCounters()
+        // Claim the session for setup. Atomic with release(): either this whole block (incl.
+        // the CONNECTING dispatch, which starts the FGS + wake lock, and the renderer reset)
+        // completes before release() can set `released` — and release()'s stop() then sees
+        // setupInFlight and defers to us — or release() won and nothing here runs.
+        synchronized(lifecycleLock) {
+            if (released) return
+            setupInFlight = true
+            setupAbort = SetupAbort.NONE
 
-        // Reset video renderer (only if initialized and codec is active).
-        // When codecDeferred=true (fresh init or reconnect), skip reset — the codec
-        // will be started by startCodecIfDeferred() at PLUGGED time with the correct
-        // surface. Calling reset() here would prematurely start the codec before the
-        // surface has stabilized (Compose layout may destroy/recreate the SurfaceView).
-        if (!codecDeferred) {
-            h264Renderer?.reset()
+            setState(State.CONNECTING)
+            setStatusText("Searching for adapter...")
+            resetUnknownCounters()
+
+            // Reset video renderer (only if initialized and codec is active).
+            // When codecDeferred=true (fresh init or reconnect), skip reset — the codec
+            // will be started by startCodecIfDeferred() at PLUGGED time with the correct
+            // surface. Calling reset() here would prematurely start the codec before the
+            // surface has stabilized (Compose layout may destroy/recreate the SurfaceView).
+            if (!codecDeferred) {
+                h264Renderer?.reset()
+            }
         }
 
-        // Initialize audio
-        if (!audioInitialized) {
-            audioInitialized = audioManager?.initialize() ?: false
-            if (audioInitialized) {
-                logInfo("Audio playback initialized", tag = Logger.Tags.AUDIO)
+        // Initialize audio. Under the lock so it cannot interleave with a concurrent stop()/
+        // release() freeing the same DualStreamAudioManager (AudioTracks created after that
+        // release would leak); skipped if a teardown was already requested.
+        synchronized(lifecycleLock) {
+            if (setupAbort == SetupAbort.NONE && !audioInitialized) {
+                audioInitialized = audioManager?.initialize() ?: false
+                if (audioInitialized) {
+                    logInfo("Audio playback initialized", tag = Logger.Tags.AUDIO)
+                }
             }
         }
 
         // Find device
         log("Searching for Carlinkit device...")
         val device = findDevice()
+        if (setupAborted()) return
         if (device == null) {
             logError("Failed to find Carlinkit device", tag = Logger.Tags.USB)
             setState(State.DISCONNECTED)
@@ -930,7 +1001,7 @@ class CarlinkManager(
         setStatusText("Adapter found — opening...")
 
         // AltVideo (USB 0x2C) gate — evaluated each session start (cheap; PlatformDetector
-        // is not cached). Both checks must pass:
+        // caches its codec scan per process). Both checks must pass:
         //   1. BuildConfig.DEBUG — production APKs are bit-identical to pre-feature behavior.
         //   2. PlatformDetector.isAaosEmulator() — Build.PRODUCT starts with "sdk_gcar".
         //      Real GM IHU + Pixel + everything else stays inert. ClusterHomeDisplay
@@ -960,6 +1031,9 @@ class CarlinkManager(
             setStatusText("USB permission denied")
             return
         }
+        // openWithPermission can suspend up to 30 s on the permission dialog; a stop/release
+        // in that window must not be followed by writes. finishSetup closes the device.
+        if (setupAborted()) return
 
         // Clear any stale adapter session left by a prior force-kill or crash.
         // The adapter firmware retains session state across USB reconnects. If the previous
@@ -979,6 +1053,7 @@ class CarlinkManager(
         //   /Volumes/POTATO/cpc200/20260420/*.log, adapter_tty_215842_20APR26.log:845,
         //   adapter_tty_214729_20APR26.log:4983 (Host-No-Response path).
         Thread.sleep(200)
+        if (setupAborted()) return
 
         // Create video processor for direct USB -> codec data flow
         // This bypasses message parsing for zero-copy performance (DIRECT_HANDOFF)
@@ -1031,6 +1106,9 @@ class CarlinkManager(
 
         setStatusText("Initializing adapter...")
         val initSuccess = adapterDriver?.start(refreshedConfig, initMode.name, pendingChanges, actualSurfaceWidth, actualSurfaceHeight) ?: false
+        // Teardown requested during the paced init sequence: skip the tail (targeted-connect
+        // override, init bookkeeping, pair timer); finishSetup stops the driver it just started.
+        if (setupAborted()) return
 
         // If a targeted connect was requested (user selected a specific device),
         // override the adapter's wifiConnect auto-connect timer with the target MAC.
@@ -1079,6 +1157,78 @@ class CarlinkManager(
             }
     }
 
+    /** True if a stop/release/reboot/error asked the in-flight start() setup to abort. */
+    private fun setupAborted(): Boolean = synchronized(lifecycleLock) { setupAbort != SetupAbort.NONE }
+
+    /**
+     * End of start()'s setup window (runs in start()'s finally, so also on exceptions and
+     * coroutine cancellation). If a teardown was requested while setup owned the session,
+     * tear down exactly what setup built — AdapterDriver.start and AdapterDriver.stop never
+     * run concurrently on the same driver, because the requester never touched it.
+     */
+    private fun finishSetup() {
+        var driver: AdapterDriver? = null
+        var device: UsbDeviceWrapper? = null
+        val abort =
+            synchronized(lifecycleLock) {
+                setupInFlight = false
+                val requested = setupAbort
+                setupAbort = SetupAbort.NONE
+                if (requested != SetupAbort.NONE) {
+                    driver = adapterDriver
+                    device = usbDevice
+                    adapterDriver = null
+                    usbDevice = null
+                }
+                requested
+            }
+        if (abort == SetupAbort.NONE) return
+
+        logInfo(
+            "[LIFECYCLE] Teardown ($abort) requested during start() setup" +
+                "${if (released) " (manager released)" else ""} — tearing down the half-built session",
+            tag = Logger.Tags.ADAPTR,
+        )
+        clearPairTimeout()
+        if (abort >= SetupAbort.GRACEFUL) {
+            driver?.sendGracefulTeardown(reboot = abort == SetupAbort.GRACEFUL_REBOOT)
+        }
+        driver?.stop()
+        device?.close()
+        // The requester already set DISCONNECTED; repeat it in case setup re-published a
+        // state in between (no-op dispatch when unchanged; allowed after release).
+        setState(State.DISCONNECTED)
+    }
+
+    /**
+     * Atomically detach adapterDriver/usbDevice for the caller to tear down. If start() is
+     * mid-setup it owns both: record [mode] for [finishSetup] instead and return null.
+     */
+    private fun detachSessionOrDefer(mode: SetupAbort): Pair<AdapterDriver?, UsbDeviceWrapper?>? =
+        synchronized(lifecycleLock) {
+            if (setupInFlight) {
+                if (mode > setupAbort) setupAbort = mode
+                null
+            } else {
+                val detached = adapterDriver to usbDevice
+                adapterDriver = null
+                usbDevice = null
+                detached
+            }
+        }
+
+    /** Release session audio atomically with start()'s audio-init section. */
+    private fun releaseSessionAudio(): Boolean =
+        synchronized(lifecycleLock) {
+            if (audioInitialized) {
+                audioManager?.release()
+                audioInitialized = false
+                true
+            } else {
+                false
+            }
+        }
+
     /**
      * Stop and disconnect.
      *
@@ -1110,26 +1260,29 @@ class CarlinkManager(
         isAlertAudioActive = false // Reset purpose on disconnect
         stopMicrophoneCapture()
 
+        // Take the driver/USB device for teardown — or, if start() is mid-setup and owns
+        // them, hand the teardown (incl. the reboot request) to start()'s finishSetup.
+        val detached = detachSessionOrDefer(if (reboot) SetupAbort.GRACEFUL_REBOOT else SetupAbort.GRACEFUL)
+        val driver = detached?.first
+        if (detached == null) {
+            logInfo("[LIFECYCLE] stop() during start() setup — driver/USB teardown deferred to start()", tag = Logger.Tags.ADAPTR)
+        }
+
         // Stop GPS forwarding before stopping adapter (only if forwarder was created)
         if (gnssForwarder != null) {
-            adapterDriver?.sendCommand(CommandMapping.STOP_GNSS_REPORT)
+            driver?.sendCommand(CommandMapping.STOP_GNSS_REPORT)
             gnssForwarder?.stop()
         }
 
         // Graceful teardown: notify adapter before killing connection.
-        // Must happen before adapterDriver?.stop() (send() checks isRunning).
-        adapterDriver?.sendGracefulTeardown(reboot = reboot)
+        // Must happen before driver.stop() (send() checks isRunning).
+        driver?.sendGracefulTeardown(reboot = reboot)
 
-        adapterDriver?.stop()
-        adapterDriver = null
-
-        usbDevice?.close()
-        usbDevice = null
+        driver?.stop()
+        detached?.second?.close()
 
         // Stop audio
-        if (audioInitialized) {
-            audioManager?.release()
-            audioInitialized = false
+        if (releaseSessionAudio()) {
             logInfo("Audio released on stop", tag = Logger.Tags.AUDIO)
         }
 
@@ -1314,15 +1467,13 @@ class CarlinkManager(
         logWarn("[LIFECYCLE] Reboot adapter requested", tag = Logger.Tags.ADAPTR)
         cancelReconnect()
         stopMicrophoneCapture()
-        adapterDriver?.rebootAdapter()
-        adapterDriver?.stop()
-        adapterDriver = null
-        usbDevice?.close()
-        usbDevice = null
-        if (audioInitialized) {
-            audioManager?.release()
-            audioInitialized = false
-        }
+        // Mid-setup, start() owns the driver: it sends DisconnectPhone+CloseDongle+Reboot
+        // (sendGracefulTeardown(reboot = true)) from finishSetup instead of the bare 0xCD here.
+        val detached = detachSessionOrDefer(SetupAbort.GRACEFUL_REBOOT)
+        detached?.first?.rebootAdapter()
+        detached?.first?.stop()
+        detached?.second?.close()
+        releaseSessionAudio()
         codecDeferred = true // Reset for next connection
         currentPhoneType = null
         currentWifi = null
@@ -1347,8 +1498,15 @@ class CarlinkManager(
      * Releases owned subsystems in LIFO order relative to initialization: stop() first (which
      * winds down the session and adapter driver), then H264Renderer, DualStreamAudioManager,
      * MicrophoneCaptureManager, GnssForwarder, MediaSessionManager, finally scope.cancel().
+     *
+     * Safe against an in-flight [start] on Dispatchers.IO and never blocks on it (callers
+     * include the main thread): `released` is set first, so a start() that has not yet
+     * claimed setup returns without touching anything, and one mid-setup sees the abort
+     * recorded by stop() below and tears down the driver/USB device it built itself.
+     * After this, the manager never re-enters an active state (see [setState]).
      */
     fun release() {
+        synchronized(lifecycleLock) { released = true }
         stop()
 
         h264Renderer?.stop()
@@ -1624,6 +1782,11 @@ class CarlinkManager(
         // at non-overlapping lifecycle phases — but the invariant is NOT enforced by the
         // AtomicReference; it's a property of the callers. If a third caller site appears
         // on a different thread, wrap the whole body in a lock.
+        //
+        // A released manager only ever moves to DISCONNECTED: its CONNECTING/active states
+        // would start the process-global connection FGS and this instance's wake lock on
+        // behalf of a dead manager (e.g. a straggling USB-read-thread PLUGGED).
+        if (released && newState != State.DISCONNECTED) return
         val oldState = currentState.getAndSet(newState)
         if (oldState != newState) {
             callback?.onStateChanged(newState)
@@ -1632,6 +1795,9 @@ class CarlinkManager(
     }
 
     private fun setStatusText(text: String) {
+        // Released: the MediaSession is app-scope and shared with the replacement manager —
+        // a straggler's status text must not overwrite its placeholder.
+        if (released) return
         callback?.onStatusTextChanged(text)
         // Mirror status text to MediaSession placeholder so cluster, cardview, and
         // CarMediaApp surfaces all show the same user-facing state the main app UI
@@ -1764,7 +1930,9 @@ class CarlinkManager(
         var device: UsbDeviceWrapper? = null
         var attempts = 0
 
-        while (device == null && attempts < 10) {
+        // setupAborted(): a stop/release during the up-to-30 s poll ends it at the next
+        // iteration instead of holding startMutex (and the replacement manager) for the rest.
+        while (device == null && attempts < 10 && !setupAborted()) {
             device = UsbDeviceWrapper.findFirst(context, usbManager) { log(it) }
 
             if (device == null) {
@@ -2923,16 +3091,14 @@ class CarlinkManager(
         gnssForwarder?.stop()
 
         // Stop adapter driver (heartbeat, reading loop) and close USB.
-        // Skip graceful teardown — USB is likely dead.
-        adapterDriver?.stop()
-        adapterDriver = null
-        usbDevice?.close()
-        usbDevice = null
+        // Skip graceful teardown — USB is likely dead. Mid-setup (incl. the synchronous
+        // "USB device not opened" error from inside AdapterDriver.start), start() owns the
+        // driver and tears it down in finishSetup.
+        val detached = detachSessionOrDefer(SetupAbort.HARD)
+        detached?.first?.stop()
+        detached?.second?.close()
 
-        if (audioInitialized) {
-            audioManager?.release()
-            audioInitialized = false
-        }
+        releaseSessionAudio()
 
         // Pattern A: track consecutive "no initial response" errors (adapter USB write dead)
         // Pattern C: track short-lived STREAMING sessions (unstable adapter)
@@ -2997,6 +3163,10 @@ class CarlinkManager(
     private fun scheduleReconnect() {
         // Cancel any existing reconnect attempt
         reconnectJob?.cancel()
+
+        // A released manager's scope is cancelled (the job below would never run), but the
+        // startConnectionForeground call below would still start the process-global FGS.
+        if (released) return
 
         if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
             logWarn(

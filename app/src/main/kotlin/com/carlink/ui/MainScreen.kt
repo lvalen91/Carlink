@@ -68,7 +68,9 @@ import com.carlink.ui.components.VideoSurface
 import com.carlink.ui.components.rememberVideoSurfaceState
 import com.carlink.ui.settings.DisplayMode
 import com.carlink.ui.theme.AutomotiveDimens
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Main projection screen displaying H.264 video via SurfaceView (HWC overlay) with touch forwarding.
@@ -166,7 +168,11 @@ fun MainScreen(
             )
             if (!hasStartedConnection) {
                 hasStartedConnection = true
-                carlinkManager.start()
+                // start() does blocking USB I/O, AudioTrack setup and a 200 ms Thread.sleep;
+                // keep it off the main thread like every other caller (restart, reconnect,
+                // MainActivity.onNewIntent). Its UI-facing side effects are callback writes to
+                // Compose snapshot state and MediaSessionManager calls, both safe off-main.
+                withContext(Dispatchers.IO) { carlinkManager.start() }
             }
         }
     }

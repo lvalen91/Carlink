@@ -806,3 +806,13 @@
    - Fix: unit-test jvmArgs add --add-opens for jdk.internal.access, java.io, java.lang, java.lang.reflect.
    - Verified green: ktlintCheck, detekt, lintSideloadDebug, testSideloadDebugUnitTest, assembleSideloadDebug. Not yet hardware-tested on gminfo37.
    - Affected: build.gradle.kts (root + app), gradle-wrapper.properties, documents/revisions.txt
+
+[158] :: Decoder-probe ANR fix + platform-detection cache + start()/release() race guard. Root-caused via 4/4 reproduction on the GM real-kernel Silverado EV VCUUM-470.3 VM.
+   - Root cause: DecoderCompat.adjust() ran a synchronous MediaCodec probe on the main thread inside onCreate's decorView.post block; a stuck probe blocked the window's FocusEvent ACK past Android's 5s ANR window, killing the app before any USB adapter search ever started.
+   - DecoderCompat.kt: added adjustAsync() — probe runs on a dedicated DecoderProbe thread with a 2s timeout, result posted back to the main thread; on timeout the input size is used unchanged and not cached, matching the existing inconclusive-probe fallback.
+   - MainActivity.kt: initializeCarlinkManager() split so the manager-building tail (completeInit) runs when adjustAsync's callback fires; new managerInitGeneration counter discards a late probe result if the user already changed display mode mid-probe, preventing a leaked/overwritten CarlinkManager.
+   - PlatformDetector.kt: added a process-level cache for the hardware H.264 decoder name and native sample rate (both context-independent); display width/height stay uncached since they're legitimately context/display-mode dependent. Fixes repeated "Found hardware decoder" re-scans from 7 call sites across MainActivity/CarlinkManager/AdapterConfigPreference/DisplayModePreference.
+   - CarlinkManager.kt: start() moved off the main thread (MainScreen.kt LaunchedEffect now uses Dispatchers.IO) exposed a release()-during-setup race where a torn-down manager's AdapterDriver could still finish starting and contend for the USB device. Added a companion startMutex plus released/setupInFlight guards with abort checkpoints through setup; a release requested mid-setup now tears down whatever start() just built instead of leaving it live. Covers all start() callers (MainScreen, onNewIntent, restart, reconnect).
+   - New unit tests: PlatformDetectorTest (cache-once, concurrent-call, failure-retry). DecoderCompatTest (12) and StableIconRegistryTest (4) still pass.
+   - Verified: assembleSideloadDebug + all 20 unit tests green. NOT yet run on a device/emulator — the ANR fix itself is unconfirmed at runtime.
+   - Affected: platform/DecoderCompat.kt, MainActivity.kt, platform/PlatformDetector.kt, CarlinkManager.kt, ui/MainScreen.kt, platform/PlatformDetectorTest.kt (new).
