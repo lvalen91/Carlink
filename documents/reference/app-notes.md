@@ -95,12 +95,25 @@ the adapter and never let an app claim it, unless the adapter's USB identity has
 seen as a device type GM's USB admission code recognizes. This is host-OS filtering, not an
 adapter fault, and it's why the old Carlinkit **UDisk mode** toggle worked around it.
 
-GM's `UsbHostManager` only admits a fixed set of device types (mass storage, MTP/phone-tablet,
-ADB, Android Auto, hubs). The adapter's actual working mode isn't on that list, so on first
-attach with an unrecognized serial number, GM shows the toast and never offers the device to
-any app. It does, however, remember the serial number of any device it just admitted when that
-device is removed, and will silently re-admit a reconnecting device — skipping the toast — if
-the same serial number comes back attached to a recognized class/type.
+Confirmed directly against a decompile of a real VCUUM-470.3 `services.jar` (SHA-1-matched to
+a live system image) and reproduced live: `UsbHostManager.usbDeviceAdded()` rejects the device
+*before* it's ever added to the device list — so the rejection is invisible to every app, not
+just this one, and `UsbManager.requestPermission()` is never reached because the app-level
+permission step is structurally unreachable for a rejected device.
+
+The admission allow-list recognizes a fixed set of device types: mass storage, MTP/ADB/phone-
+tablet interfaces, Android Auto's specific VID/PID pattern, Apple iPhone, GM's own BCS/Aptiv
+hubs, and generic USB hubs. The adapter's actual working mode isn't on that list, so on first
+attach with an unrecognized serial number, GM rejects it and shows the toast. It does, however,
+remember the serial number of the most recently admitted-then-removed device in a single
+in-memory slot, and will silently re-admit a reconnecting device — skipping the toast — if the
+same serial comes back attached to a recognized class/type. That slot is overwritten by the
+next admitted device's removal and is lost whenever `system_server` restarts.
+
+**The gate itself is disabled entirely on debuggable builds** (`ro.debuggable=1`) — this, not
+any USB driver or hardware difference, is why the adapter can be claimed on a userdebug/dev
+build (e.g. an AVD-style image) but not on GM's real production (`user`-type) firmware. A
+production vehicle ships the same enforced gate as a production-build VM.
 
 **Why UDisk mode fixed it:** the adapter's serial number is shared across units. Toggling UDisk
 mode makes the adapter re-enumerate as mass storage — a recognized type — so GM admits it and
