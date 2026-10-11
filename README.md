@@ -58,6 +58,13 @@ makes the system honor the app's **Distraction Optimization** declarations — s
 it normally — instead of treating a plain sideload as non-optimized and restricting it. A signed
 `sideload` APK is attached to each [GitHub Release](../../releases), or you can build one yourself.
 
+> [!IMPORTANT]
+> **The APK in [Releases](../../releases) is only for people who can freely sideload via ADB.**
+> It is already signed with the author's key and uses the `zeno.carlink` package name, so it
+> **cannot be uploaded to your own Google Play account** — Play requires a package name you own
+> and your own signing key/certificate. GM vehicles without ADB (see above) must build their own
+> bundle with their own package name and key; the Release APK will not work for that path.
+
 ## Key limitations
 
 Full explanations in **[app notes](documents/reference/app-notes.md)**:
