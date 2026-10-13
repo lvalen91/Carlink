@@ -2,19 +2,26 @@ package com.carlink.ui.theme
 
 import android.app.Activity
 import android.os.Build
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
+
+// This app is permanently dark-themed by design (all-black window/Compose backgrounds
+// elsewhere); there is deliberately no light scheme. Some AAOS builds report
+// `isSystemInDarkTheme() == false` regardless of the GM skin's actual (dark) appearance, so a
+// system-following theme previously leaked a light scheme's near-white
+// surfaceVariant/surfaceContainerHighest tones into any composable reading them directly
+// (confirmed live: forcing system night mode on made the leak disappear). Don't reintroduce a
+// light/system-following scheme without also auditing every `MaterialTheme.colorScheme.*` use.
+// (`isSystemInDarkTheme()` in MainScreen.kt drives the separate CarPlay night-mode protocol
+// message to the phone; it has nothing to do with this app's own rendering.)
 
 /**
  * Dark color scheme chosen for this project; no automotive-specific luminance/glare tuning
@@ -63,77 +70,30 @@ private val DarkColorScheme =
         inversePrimary = Color(0xFF006780),
     )
 
-/** Light-theme path (selected by `isSystemInDarkTheme() == false`); not a fallback. */
-private val LightColorScheme =
-    lightColorScheme(
-        primary = Color(0xFF006780),
-        onPrimary = Color(0xFFFFFFFF),
-        primaryContainer = Color(0xFFB5EEFF),
-        onPrimaryContainer = Color(0xFF001F28),
-        secondary = Color(0xFF4A6366),
-        onSecondary = Color(0xFFFFFFFF),
-        secondaryContainer = Color(0xFFCCE7EA),
-        onSecondaryContainer = Color(0xFF051F22),
-        tertiary = Color(0xFF7A5900),
-        onTertiary = Color(0xFFFFFFFF),
-        tertiaryContainer = Color(0xFFFFDDB0),
-        onTertiaryContainer = Color(0xFF261900),
-        error = Color(0xFFBA1A1A),
-        onError = Color(0xFFFFFFFF),
-        errorContainer = Color(0xFFFFDAD6),
-        onErrorContainer = Color(0xFF410002),
-        surface = Color(0xFFF5FAFB),
-        onSurface = Color(0xFF171D1E),
-        // Surface container colors for cards and elevated surfaces (teal-tinted)
-        surfaceContainerLowest = Color(0xFFFFFFFF),
-        surfaceContainerLow = Color(0xFFEFF5F6),
-        surfaceContainer = Color(0xFFE9EFF0),
-        surfaceContainerHigh = Color(0xFFE3EAEB),
-        surfaceContainerHighest = Color(0xFFDDE4E6),
-        surfaceVariant = Color(0xFFDBE4E6),
-        onSurfaceVariant = Color(0xFF3F484A),
-        outline = Color(0xFF6F797A),
-        outlineVariant = Color(0xFFBFC8CA),
-        scrim = Color(0xFF000000),
-        inverseSurface = Color(0xFF2B3132),
-        inverseOnSurface = Color(0xFFECF2F3),
-        inversePrimary = Color(0xFF5FD5ED),
-    )
-
 /**
- * Material 3 theme for this project. Colors/typography were chosen for this app;
- * no automotive-specific luminance tuning has been applied (despite file naming).
+ * Material 3 theme for this project, always dark (see the comment above [DarkColorScheme]).
+ * Colors/typography were chosen for this app; no automotive-specific luminance tuning has been
+ * applied (despite file naming).
  *
- * @param darkTheme whether to apply the dark color scheme; defaults to the system setting.
- * @param dynamicColor whether to use Android 12+ dynamic color.
- *   PRECONDITION: callers MUST only pass `true` on API 31+ — this branch calls
- *   `dynamicDarkColorScheme` / `dynamicLightColorScheme` with no runtime SDK guard,
- *   and will crash on API <31. The `false` default keeps this branch dormant today.
+ * @param dynamicColor whether to use Android 12+ dynamic color. Disabled by default for
+ *   consistent branding. When `true` on API 31+ it resolves to `dynamicDarkColorScheme` only
+ *   (never the light variant); on API <31 it is ignored by the `SDK_INT` guard and the static
+ *   [DarkColorScheme] is used.
  * @param content composable content to theme.
  */
 @Composable
 fun CarlinkTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(), // Follow AAOS system theme
-    dynamicColor: Boolean = false, // Disabled for consistent branding; see KDoc precondition before enabling.
+    dynamicColor: Boolean = false,
     content: @Composable () -> Unit,
 ) {
+    // Dynamic color is API 31+. Guard with SDK_INT so the API-31 call is never reached on
+    // minSdk 29 (resolves lint [NewApi]); pre-31 falls back to DarkColorScheme even if a
+    // caller passes dynamicColor = true.
     val colorScheme =
-        when {
-            // Dynamic color is API 31+. Guard with SDK_INT so the API-31 calls are never
-            // reached on minSdk 29 (resolves lint [NewApi]); pre-31 falls through to the
-            // static schemes below even if a caller passes dynamicColor = true.
-            dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-                val context = androidx.compose.ui.platform.LocalContext.current
-                if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-            }
-
-            darkTheme -> {
-                DarkColorScheme
-            }
-
-            else -> {
-                LightColorScheme
-            }
+        if (dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            dynamicDarkColorScheme(androidx.compose.ui.platform.LocalContext.current)
+        } else {
+            DarkColorScheme
         }
 
     val view = LocalView.current
@@ -144,19 +104,18 @@ fun CarlinkTheme(
         //
         // KNOWN INEFFICIENCY: `SideEffect` runs on every successful recomposition, so the
         // window/insets writes below re-apply each time. They are idempotent (no visible
-        // flicker), but this should ideally be `LaunchedEffect(darkTheme, colorScheme)` so
-        // the work only runs when inputs actually change.
+        // flicker), but this could be a keyed effect so the work only runs once.
         SideEffect {
             val window = (view.context as Activity).window
             // System-bar background colors are intentionally NOT set here. Window
             // statusBarColor / navigationBarColor are deprecated (edge-to-edge enforcement),
             // and MainActivity already calls enableEdgeToEdge(), drawing content behind
-            // transparent system bars. We only drive the bar ICON appearance (light/dark) to
-            // match the theme; the bar scrims are handled by edge-to-edge. (This also removes
-            // the prior background-vs-surface color-mismatch hazard.)
+            // transparent system bars. We only drive the bar ICON appearance: light icons
+            // (appearance-light = false) since the app is always dark; the bar scrims are
+            // handled by edge-to-edge.
             WindowCompat.getInsetsController(window, view).apply {
-                isAppearanceLightStatusBars = !darkTheme
-                isAppearanceLightNavigationBars = !darkTheme
+                isAppearanceLightStatusBars = false
+                isAppearanceLightNavigationBars = false
             }
         }
     }

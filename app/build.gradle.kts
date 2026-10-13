@@ -27,7 +27,7 @@ android {
         // versionCode is the single source of truth (Play requires a monotonic integer;
         // it also matches the revisions.txt [NNN] entry and the release tag vNNN).
         // versionName is DERIVED so the two can never drift: 157 -> "1.57", 207 -> "2.07".
-        val appVersionCode = 159
+        val appVersionCode = 160
         versionCode = appVersionCode
         versionName = "%d.%02d".format(appVersionCode / 100, appVersionCode % 100)
 

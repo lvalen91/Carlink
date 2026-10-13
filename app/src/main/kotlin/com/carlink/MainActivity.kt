@@ -34,6 +34,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -275,7 +276,13 @@ class MainActivity : ComponentActivity() {
             val manager = carlinkManagerState.value
             val displayMode = displayModeState.value
             CarlinkTheme {
-                Surface(modifier = Modifier.fillMaxSize()) {
+                // Explicit black: don't fall back to MaterialTheme.colorScheme.surface here.
+                // CarlinkTheme is permanently dark now (see Theme.kt), but this root layer stays
+                // pinned to a literal color rather than the theme's surface token, so it can't
+                // regress to a light paint here even if the theme's resolution logic changes
+                // again later — this was the exact leak site history (now-removed LightColorScheme
+                // bled through here when isSystemInDarkTheme() read false on this hardware).
+                Surface(modifier = Modifier.fillMaxSize(), color = Color.Black) {
                     if (manager != null) {
                         CarlinkApp(
                             carlinkManager = manager,
@@ -461,7 +468,9 @@ class MainActivity : ComponentActivity() {
                 // Status bar visible (subtract from video), nav bar hidden (cutout exposed bottom/sides)
                 videoWidth = bounds.width()
                 videoHeight = bounds.height() - systemBarInsets.top
-                safeInsetTop = 0 // status bar covers top
+                // Video starts below the status bar; only the part of the top cutout that extends
+                // past it is exposed. Status bar does not always cover the cutout (ct5_base: T:115, bar 0).
+                safeInsetTop = maxOf(0, cutoutInsets.top - systemBarInsets.top)
                 safeInsetBottom = cutoutInsets.bottom
                 safeInsetLeft = cutoutInsets.left
                 safeInsetRight = cutoutInsets.right

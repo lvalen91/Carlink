@@ -912,3 +912,13 @@
    - Default arg ran PlatformDetector.detect() even when cache key existed.
    - Now checks contains() first, matching init's migration write.
    - Affected: DisplayModePreference.kt
+
+[160] :: Fixed NAV_BAR_HIDDEN safe area; app forced permanently dark; CarPlay night-mode wired up.
+   - NAV_BAR_HIDDEN safeInsetTop assumed status bar always covers the cutout; it does not on some profiles.
+   - Now uses max(0, cutoutInsets.top - systemBarInsets.top).
+   - Removed dead LightColorScheme; app theme no longer follows isSystemInDarkTheme().
+   - Root cause: that system signal is unreliable here, previously leaked a white patch into the dock area.
+   - Added setNightMode(): sends ENABLE_NIGHT_MODE/DISABLE_NIGHT_MODE to the box on session start and on system theme change.
+   - This only tells CarPlay to go dark; it no longer flips the app's own theme.
+   - Verified live: ENABLE_NIGHT_MODE fired correctly on reaching STREAMING.
+   - Affected: MainActivity.kt, ui/theme/Theme.kt, CarlinkManager.kt, ui/MainScreen.kt

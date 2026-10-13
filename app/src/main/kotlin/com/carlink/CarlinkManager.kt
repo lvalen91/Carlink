@@ -1390,6 +1390,21 @@ class CarlinkManager(
      */
     private fun sendKey(command: CommandMapping): Boolean = adapterDriver?.sendCommand(command) ?: false
 
+    /**
+     * Forward the AAOS day/night state to CarPlay mid-session via the night-mode command
+     * (ENABLE_NIGHT_MODE 16 / DISABLE_NIGHT_MODE 17, H→A→P) so CarPlay's own UI follows the head
+     * unit's theme. Pure protocol send — this does NOT affect this app's own Compose theme
+     * ([com.carlink.ui.theme.CarlinkTheme] is always dark). Safe to call anytime — a no-op when
+     * no adapter session is active (adapterDriver is null-checked). Driven by
+     * [com.carlink.ui.MainScreen] off isSystemInDarkTheme(), so it fires when a session reaches
+     * STREAMING and whenever the system theme toggles.
+     */
+    fun setNightMode(night: Boolean) {
+        val cmd = if (night) CommandMapping.ENABLE_NIGHT_MODE else CommandMapping.DISABLE_NIGHT_MODE
+        logInfo("[NIGHT] AAOS night=$night → ${cmd.name}", tag = Logger.Tags.ADAPTR)
+        scope.launch(Dispatchers.IO) { adapterDriver?.sendCommand(cmd) }
+    }
+
     // AA MOVE rate-limit timestamp. carlink_native skips a MOVE send when <17ms
     // elapsed since the previous one. See [AA_TOUCH_THROTTLE_NS] for the full
     // explanation — and the important distinction from AutoKit's use of the same
