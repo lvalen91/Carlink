@@ -230,9 +230,15 @@ class DisplayModePreference private constructor(
      * will still flag it on the main thread.
      */
     fun getDisplayModeSync(): DisplayMode =
-        DisplayMode.fromValue(
-            syncCache.getInt(SYNC_CACHE_KEY_DISPLAY_MODE, DisplayMode.platformDefault(appContext).value),
-        )
+        // contains() first: a getInt(key, platformDefault()) default argument is evaluated on
+        // every call, running PlatformDetector.detect() (MediaCodecList scan) even when the key
+        // is present. migrateFromBooleanIfNeeded() writes the key in init, so the default is
+        // effectively never needed here.
+        if (syncCache.contains(SYNC_CACHE_KEY_DISPLAY_MODE)) {
+            DisplayMode.fromValue(syncCache.getInt(SYNC_CACHE_KEY_DISPLAY_MODE, DisplayMode.SYSTEM_UI_VISIBLE.value))
+        } else {
+            DisplayMode.platformDefault(appContext)
+        }
 
     /**
      * Sets the display mode preference.

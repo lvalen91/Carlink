@@ -421,6 +421,10 @@ class MainActivity : ComponentActivity() {
             windowInsets.getInsetsIgnoringVisibility(WindowInsetsCompat.Type.systemBars())
         val cutoutInsets =
             windowInsets.getInsetsIgnoringVisibility(WindowInsetsCompat.Type.displayCutout())
+        val chromeInsets =
+            windowInsets.getInsetsIgnoringVisibility(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout(),
+            )
 
         // Compute video resolution and SafeArea insets per display mode
         val videoWidth: Int
@@ -432,11 +436,11 @@ class MainActivity : ComponentActivity() {
 
         when (currentDisplayMode) {
             DisplayMode.SYSTEM_UI_VISIBLE -> {
-                // System bars + cutouts both reduce video area. No SafeArea needed.
-                videoWidth = bounds.width() - systemBarInsets.left - systemBarInsets.right -
-                    cutoutInsets.left - cutoutInsets.right
-                videoHeight = bounds.height() - systemBarInsets.top - systemBarInsets.bottom -
-                    cutoutInsets.top - cutoutInsets.bottom
+                // System bars + cutouts both reduce video area; use the union (not the sum) of the two
+                // inset types, since on hardware where the cutout sits inside the status bar's footprint,
+                // summing them double-counts the same chrome region. No SafeArea needed.
+                videoWidth = bounds.width() - chromeInsets.left - chromeInsets.right
+                videoHeight = bounds.height() - chromeInsets.top - chromeInsets.bottom
                 safeInsetTop = 0
                 safeInsetBottom = 0
                 safeInsetLeft = 0
