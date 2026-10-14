@@ -2,5 +2,5 @@
 <voice-interaction-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:sessionService="com.carlink.assistant.SiriVoiceSessionService"
     android:recognitionService="com.carlink.assistant.SiriRecognitionService"
-    android:supportsAssist="false"
+    android:supportsAssist="true"
     android:supportsLocalInteraction="false" />
