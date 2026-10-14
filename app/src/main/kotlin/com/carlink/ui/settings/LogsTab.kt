@@ -510,7 +510,7 @@ internal fun LogsTabContent(
         AlertDialog(
             onDismissRequest = { showPurgeDialog = false },
             title = { Text("Purge all saved logs?") },
-            text = { Text("Permanently delete all app log files, including crash, exit, assistant and stall diagnostics. USB exports and settings are not affected. If logging is enabled, a fresh log will start.") },
+            text = { Text("Permanently delete all app log files, including crash, exit and stall diagnostics. USB exports and settings are not affected. If logging is enabled, a fresh log will start.") },
             dismissButton = { TextButton(onClick = { showPurgeDialog = false }) { Text("Cancel") } },
             confirmButton = {
                 TextButton(onClick = {

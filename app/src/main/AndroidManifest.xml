@@ -73,6 +73,31 @@
         android:theme="@style/Theme.CarlinkNative"
         tools:targetApi="35">
 
+        <!-- Android invokes the selected assistant; it forwards voice requests to CarPlay. -->
+        <service
+            android:name="com.carlink.assistant.SiriVoiceInteractionService"
+            android:label="@string/siri_assistant_name"
+            android:exported="true"
+            android:permission="android.permission.BIND_VOICE_INTERACTION">
+            <intent-filter>
+                <action android:name="android.service.voice.VoiceInteractionService" />
+            </intent-filter>
+            <meta-data android:name="android.voice_interaction"
+                android:resource="@xml/siri_voice_interaction" />
+        </service>
+        <service
+            android:name="com.carlink.assistant.SiriVoiceSessionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_VOICE_INTERACTION" />
+        <service
+            android:name="com.carlink.assistant.SiriRecognitionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_SPEECH_RECOGNITION_SERVICE">
+            <intent-filter>
+                <action android:name="android.speech.RecognitionService" />
+            </intent-filter>
+        </service>
+
         <!-- Main Activity -->
         <activity
             android:name=".MainActivity"
