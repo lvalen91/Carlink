@@ -109,9 +109,21 @@ set in-app adapter routing to Bluetooth instead. See
 
 From the Android emulator with USB passthrough for the CPC200-CCPA.
 
-| CarPlay (iPhone) | Android Auto (Pixel 10) | Main app |
+| CarPlay (iPhone) | Android Auto (Pixel 10) | Dashboard |
 |---|---|---|
-| ![CarPlay](screenshots/Carplay.png) | ![Android Auto](screenshots/Aauto.png) | ![Main page](screenshots/MainPage.png) |
+| ![CarPlay](screenshots/Carplay.png) | ![Android Auto](screenshots/Aauto.png) | ![Dashboard](screenshots/Dashboard-Idle.png) |
+
+**Dashboard** — the app's always-visible base screen; shows the box's advertised name and
+live connection phase, and sits behind the video while a session is streaming:
+
+| Idle, no phone connected | Over an active Android Auto session |
+|---|---|
+| ![Dashboard idle](screenshots/Dashboard-Idle.png) | ![Dashboard over projection](screenshots/Dashboard-Projection.png) |
+
+**CarPlay dark mode** — the app tells the box to switch CarPlay's own UI dark automatically,
+independent of the app's (always-dark) rendering:
+
+![CarPlay dark mode](screenshots/Carplay-DarkMode.png)
 
 **Adapter configuration** — applied on reboot via *Apply & Restart*:
 
