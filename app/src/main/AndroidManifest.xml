@@ -61,6 +61,7 @@
         android:required="false" />
 
     <application
+        android:name="com.carlink.CarlinkApplication"
         android:allowBackup="true"
         android:appCategory="audio"
         android:dataExtractionRules="@xml/data_extraction_rules"

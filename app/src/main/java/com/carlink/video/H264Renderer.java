@@ -49,6 +49,7 @@ public class H264Renderer {
     private static final class StagedFrame {
         final byte[] data;
         int length;
+        long generation;
         StagedFrame(int capacity) {
             this.data = new byte[capacity];
         }
@@ -99,6 +100,9 @@ public class H264Renderer {
     private final AtomicLong feedSuccesses = new AtomicLong(0);
     private volatile long lastFeedTime = 0;
     private volatile long lastRenderTime = 0;
+    private volatile long lastReceiveTime = 0;
+    private com.carlink.logging.StallWindow diagnosticWindow = new com.carlink.logging.StallWindow();
+    private int diagnosticSamples = 0;
 
     // Silent failure tracking - helps diagnose zombie codec state
     private final AtomicLong feedExceptionCount = new AtomicLong(0);
@@ -116,6 +120,7 @@ public class H264Renderer {
 
     // Watchdog executor and state
     private ScheduledExecutorService watchdogExecutor;
+    private ScheduledExecutorService diagnosticExecutor;
     private long watchdogLastReceivedSnapshot;
     private long watchdogLastDecodedSnapshot;
     private int watchdogConsecutiveFailures;
@@ -142,6 +147,8 @@ public class H264Renderer {
     // Sync gate — discard P-frames until first SPS/PPS+IDR arrives.
     // Prevents feeding undecodable frames if initial keyframe bundle is lost.
     private volatile boolean syncAcquired = false;
+    private final AtomicLong streamGeneration = new AtomicLong(0);
+    private long decoderGeneration = -1;
 
     // PTS tracking for sync mode: elapsed time from first frame
     private volatile long startDecodeTime = 0;
@@ -401,6 +408,8 @@ public class H264Renderer {
     /** Start the codec zombie watchdog. Schedules periodic health checks. */
     private void startWatchdog() {
         stopWatchdog();
+        diagnosticWindow = new com.carlink.logging.StallWindow();
+        diagnosticSamples = 0;
         watchdogLastReceivedSnapshot = sessionFramesReceived.get();
         watchdogLastDecodedSnapshot = sessionFramesDecoded.get();
         watchdogConsecutiveFailures = 0;
@@ -413,12 +422,21 @@ public class H264Renderer {
                     return t;
                 });
         watchdogExecutor = exec;
+        diagnosticExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "CL-VideoMonitor");
+            t.setDaemon(true);
+            return t;
+        });
+        diagnosticExecutor.scheduleAtFixedRate(this::diagnosticTick, 1, 1, TimeUnit.SECONDS);
         exec.scheduleAtFixedRate(this::watchdogTick, WATCHDOG_INTERVAL_MS, WATCHDOG_INTERVAL_MS,
                 TimeUnit.MILLISECONDS);
     }
 
     /** Stop the codec zombie watchdog. */
     private void stopWatchdog() {
+        ScheduledExecutorService diagnostics = diagnosticExecutor;
+        diagnosticExecutor = null;
+        if (diagnostics != null) diagnostics.shutdownNow();
         ScheduledExecutorService exec = watchdogExecutor;
         watchdogExecutor = null;
         if (exec != null) {
@@ -426,11 +444,31 @@ public class H264Renderer {
         }
     }
 
+    /** Independent observations continue while the recovery watchdog is busy. */
+    private void diagnosticTick() {
+        try {
+            if (!running || surface == null || !surface.isValid()) return;
+
+            long now = System.currentTimeMillis();
+            long rxAge = lastReceiveTime == 0 ? -1 : now - lastReceiveTime;
+            long renderAge = lastRenderTime == 0 ? -1 : now - lastRenderTime;
+            String sample = "rxTotal=" + sessionFramesReceived.get() + " decTotal=" + sessionFramesDecoded.get() +
+                    "rxAgeMs=" + rxAge + " renderAgeMs=" + renderAge + " codec=" + (mCodec != null);
+            if (now - lastLifecycleEventTime > WATCHDOG_GRACE_PERIOD_MS && lastRenderTime > 0) {
+                String event = diagnosticWindow.sample(android.os.SystemClock.elapsedRealtime(), true,
+                        lastRenderTime, sample, rxAge >= 2000);
+                if (event != null) logPerf("[VIDEO_STALL_WINDOW] " + event);
+                if (++diagnosticSamples % 10 == 0) logPerf("[VIDEO_SHORT_SAMPLE] " + sample);
+            }
+        } catch (Exception ignored) {
+            // Surface/codec can be released concurrently with a diagnostic sample.
+        }
+    }
+
     /** Periodic watchdog tick — detects zombie codec (receiving frames but not decoding). */
     private void watchdogTick() {
         try {
             if (!running || surface == null || !surface.isValid()) return;
-
             long now = System.currentTimeMillis();
             if (now - lastLifecycleEventTime < WATCHDOG_GRACE_PERIOD_MS) return;
 
@@ -692,6 +730,14 @@ public class H264Renderer {
      * - Starts render thread on first frame
      */
     private void decodeFrame(StagedFrame frame) {
+        long generation = streamGeneration.get();
+        if (decoderGeneration != generation) {
+            decoderGeneration = generation;
+            syncAcquired = false;
+        }
+        // A dropped reference frame invalidates all queued dependent frames.
+        // Wait for a fresh sync bundle instead of rendering corrupted P-frames.
+        if (frame.generation != generation) return;
         MediaCodec codec = mCodec;
         if (codec == null) return;
 
@@ -983,11 +1029,14 @@ public class H264Renderer {
     public boolean feedDirect(byte[] data, int offset, int length) {
         if (!running) return false;
         framesReceived.incrementAndGet();
+        lastReceiveTime = System.currentTimeMillis();
         sessionFramesReceived.incrementAndGet();
         logStats();
 
         // Guard: reject frames exceeding staging capacity (corrupted USB data)
         if (length > STAGED_FRAME_CAPACITY) {
+            streamGeneration.incrementAndGet();
+            stagingOverwriteDetected = true;
             oversizedDropCount.incrementAndGet();
             logPerf("Oversized drop: " + length + "B > " + STAGED_FRAME_CAPACITY + "B");
             return false;
@@ -995,6 +1044,7 @@ public class H264Renderer {
 
         StagedFrame wf = writeFrame;
         if (wf == null) {
+            streamGeneration.incrementAndGet();
             // Pool momentarily drained — writeFrame goes null after a successful stagingOffer()
             // when framePool was empty at that instant; the feeder returns a buffer within ~1ms.
             // Track this drop SYMMETRICALLY with the queue-full path below so an IDR lost here
@@ -1013,6 +1063,7 @@ public class H264Renderer {
         // The only real work: memcpy into pre-allocated buffer
         System.arraycopy(data, offset, wf.data, 0, length);
         wf.length = length;
+        wf.generation = streamGeneration.get();
 
         // FIFO enqueue — feeder thread drains in order
         if (stagingOffer(wf)) {
@@ -1027,6 +1078,7 @@ public class H264Renderer {
             // queue-full path. The feeder returns buffers to the pool within ~1ms.
         } else {
             // Queue full — drop incoming frame (preserves FIFO order of already-queued frames).
+            streamGeneration.incrementAndGet();
             // wf stays as writeFrame for reuse (data will be overwritten next call).
             stagingDropCount.incrementAndGet();
             stagingOverwriteDetected = true;

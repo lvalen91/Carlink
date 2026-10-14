@@ -103,7 +103,7 @@ class MicrophoneCaptureManager(
 ) {
     private var audioRecord: AudioRecord? = null
     private var micBuffer: AudioRingBuffer? = null
-    private var currentFormat: MicFormatConfig? = null
+    @Volatile private var currentFormat: MicFormatConfig? = null
     private var captureThread: MicCaptureThread? = null
     private val isRunning = AtomicBoolean(false)
 
@@ -301,6 +301,29 @@ class MicrophoneCaptureManager(
         // Common case: bytesRead == readBuffer.size → return pre-allocated buffer directly (zero alloc)
         // Rare case: partial read → copyOf to avoid sending stale bytes (caller uses array.size)
         return if (bytesRead == readBuffer.size) readBuffer else readBuffer.copyOf(bytesRead)
+    }
+
+    /**
+     * Keep live-call capture close to real time when a USB write was delayed.
+     * Returning old PCM is worse than dropping a small amount: it makes the far
+     * end hear speech increasingly late for the rest of the call.
+     */
+    fun trimBufferedAudio(maxLatencyMs: Int = 80): Int {
+        val buffer = micBuffer ?: return 0
+        val currentMs = buffer.fillLevelMs()
+        if (currentMs <= maxLatencyMs) return 0
+
+        val bytesPerMs =
+            when (val format = currentFormat) {
+                null -> return 0
+                else -> (format.sampleRate * format.bytesPerSample) / 1000
+            }
+        val bytesToDiscard = (currentMs - maxLatencyMs) * bytesPerMs
+        val discarded = buffer.discardOldest(bytesToDiscard)
+        if (discarded > 0) {
+            log("[MIC] Dropped ${discarded}B of stale capture audio (buffer=${currentMs}ms)")
+        }
+        return discarded
     }
 
     /** Get current decode type (3, 5, 6, or 7), or -1 if not capturing. */

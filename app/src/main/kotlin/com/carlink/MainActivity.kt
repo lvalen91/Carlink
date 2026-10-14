@@ -151,6 +151,11 @@ class MainActivity : ComponentActivity() {
     // Pending reinit handler — tracked for cancellation on rapid display mode changes
     private var pendingReinitRunnable: Runnable? = null
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val lifecycleWorker = java.util.concurrent.Executors.newSingleThreadExecutor {
+        Thread(it, "CL-Lifecycle")
+    }
+    private var automaticRebuildUsed = false
+    private var reinitGeneration = 0L
 
     // Permission launchers — chained: mic callback triggers location request
     private val locationPermissionLauncher =
@@ -288,7 +293,10 @@ class MainActivity : ComponentActivity() {
                             // path display-mode changes use. Turns a probabilistic repair
                             // into a deterministic one: new SurfaceView, fresh HWC plane,
                             // fresh WindowMetrics, renegotiated Open() — every time.
-                            onResetConnection = { reinitializeForDisplayMode(currentDisplayMode) },
+                            onResetConnection = {
+                                automaticRebuildUsed = false // Explicit user retry starts a fresh recovery budget.
+                                reinitializeForDisplayMode(currentDisplayMode)
+                            },
                         )
                     }
                 }
@@ -337,7 +345,7 @@ class MainActivity : ComponentActivity() {
         } else {
             // Short transitions retain the low-latency codec-only path.
             logInfo("[LIFECYCLE] onStart - resuming video", tag = "MAIN")
-            manager?.resumeVideo()
+            manager?.let { lifecycleWorker.execute { it.resumeVideo() } }
         }
     }
 
@@ -350,7 +358,7 @@ class MainActivity : ComponentActivity() {
         // BufferQueue to fill up, stalling the decoder. Flushing prevents this.
         // USB connection and audio continue unaffected.
         logInfo("[LIFECYCLE] onStop - pausing video", tag = "MAIN")
-        carlinkManager?.pauseVideo()
+        carlinkManager?.let { manager -> lifecycleWorker.execute { manager.pauseVideo() } }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -386,9 +394,16 @@ class MainActivity : ComponentActivity() {
         // MediaSession but does NOT release it — see CarlinkManager.release KDoc).
         // The MediaSession itself is owned by CarlinkMediaBrowserService; it releases
         // on its own onDestroy. Just drop the local reference here.
-        carlinkManager?.release()
+        val destroyedManager = carlinkManager
+        reinitGeneration++
+        pendingReinitRunnable?.let { mainHandler.removeCallbacks(it) }
+        val destroyedLogManager = fileLogManager
+        lifecycleWorker.execute {
+            destroyedManager?.release()
+            destroyedLogManager?.release()
+        }
+        lifecycleWorker.shutdown()
         mediaSessionManager = null
-        fileLogManager?.release()
 
         logInfo("MainActivity destroyed", tag = "MAIN")
     }
@@ -423,6 +438,14 @@ class MainActivity : ComponentActivity() {
         // filters everything and the log file stays header-only.
         CoroutineScope(Dispatchers.IO).launch {
             val prefs = LoggingPreferences.getInstance(this@MainActivity)
+            // Enable rolling operational diagnostics once for existing installs;
+            // subsequent user changes to logging controls remain respected.
+            val diagnosticsPrefs = getSharedPreferences("rolling_diagnostics", Context.MODE_PRIVATE)
+            if (!diagnosticsPrefs.getBoolean("configured", false)) {
+                prefs.setLoggingEnabled(true)
+                prefs.setLogLevel(LogPreset.NORMAL)
+                diagnosticsPrefs.edit().putBoolean("configured", true).apply()
+            }
             val preset = prefs.logLevelFlow.first()
             preset.apply()
             val enabled = prefs.loggingEnabledFlow.first()
@@ -649,6 +672,16 @@ class MainActivity : ComponentActivity() {
         applyAudioTransferModeToMediaSession(config.audioTransferMode)
 
         carlinkManager = CarlinkManager(this, config, mediaSessionManager)
+        val manager = carlinkManager
+        if (!automaticRebuildUsed) {
+            manager?.onRecoveryExhausted = {
+                if (!isDestroyed && !isFinishing && carlinkManager === manager && !automaticRebuildUsed) {
+                    automaticRebuildUsed = true
+                    logWarn("[AUTO_REBUILD] One bounded manager/surface recovery", tag = "MAIN")
+                    reinitializeForDisplayMode(currentDisplayMode)
+                }
+            }
+        }
         carlinkManagerState.value = carlinkManager
         displayModeState.value = currentDisplayMode
     }
@@ -725,6 +758,7 @@ class MainActivity : ComponentActivity() {
      * End state is identical to kill+relaunch.
      */
     fun reinitializeForDisplayMode(newMode: DisplayMode) {
+        val generation = ++reinitGeneration
         // Cancel any pending reinit from a previous rapid display mode change
         pendingReinitRunnable?.let { mainHandler.removeCallbacks(it) }
         pendingReinitRunnable = null
@@ -763,9 +797,7 @@ class MainActivity : ComponentActivity() {
             logInfo("[DISPLAY_REINIT] Stopping current adapter session", tag = "MAIN")
             // Clear Compose reference FIRST — stops surface callbacks into old manager
             carlinkManagerState.value = null
-            oldManager.release()
             carlinkManager = null
-            logInfo("[DISPLAY_REINIT] Old CarlinkManager released", tag = "MAIN")
         }
 
         // 2. Apply new display mode (shows/hides system bars)
@@ -787,7 +819,15 @@ class MainActivity : ComponentActivity() {
             pendingReinitRunnable = null
         }
         pendingReinitRunnable = reinitRunnable
-        mainHandler.postDelayed(reinitRunnable, 200)
+        lifecycleWorker.execute {
+            oldManager?.release()
+            logInfo("[DISPLAY_REINIT] Old manager released off main thread", tag = "MAIN")
+            mainHandler.post {
+                if (generation == reinitGeneration && !isDestroyed && !isFinishing) {
+                    mainHandler.postDelayed(reinitRunnable, 200)
+                }
+            }
+        }
     }
 
     /** Build HU_VIEWAREA_INFO (24 bytes): [screen_w, screen_h, view_w, view_h, originX, originY] */

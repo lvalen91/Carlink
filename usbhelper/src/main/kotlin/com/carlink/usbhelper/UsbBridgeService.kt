@@ -17,7 +17,12 @@ import com.carlink.usbbridge.UsbBridgeConstants
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * USB owner for the GM fixed-handler workaround.
@@ -35,6 +40,29 @@ class UsbBridgeService : Service() {
     private var outEndpoint: UsbEndpoint? = null
     private var reader: Thread? = null
     private val pendingWrites = ConcurrentHashMap<Long, ChunkAccumulator>()
+    private val deliveryGeneration = AtomicLong(0)
+    private val transferIds = AtomicLong(1)
+    private val lastReadNs = AtomicLong(0)
+    private val lastWriteNs = AtomicLong(0)
+    private val lastAudioReadNs = AtomicLong(0)
+    private val maxAudioGapMs = AtomicLong(0)
+    private val maxAudioQueueMs = AtomicLong(0)
+    private val maxAudioCallbackMs = AtomicLong(0)
+    private val lastDeliverySummaryNs = AtomicLong(System.nanoTime())
+    @Volatile private var lastWriteResult = 0
+    @Volatile private var lastWriteElapsedMs = 0L
+
+    // Never perform Binder callbacks on the USB reader thread. A slow app-side
+    // callback (codec, media metadata, or audio routing) must not stop USB reads
+    // for every other message type. One bounded worker preserves protocol order.
+    private val realtimeDispatch =
+        ThreadPoolExecutor(
+            1,
+            1,
+            0L,
+            TimeUnit.MILLISECONDS,
+            ArrayBlockingQueue(128),
+        )
 
     private val binder = object : IUsbBridge.Stub() {
         override fun open(): Boolean = openDevice()
@@ -75,7 +103,12 @@ class UsbBridgeService : Service() {
             val conn = connection ?: return false
             val endpoint = outEndpoint ?: return false
             return synchronized(writeLock) {
-                conn.bulkTransfer(endpoint, message, message.size, WRITE_TIMEOUT) == message.size
+                val started = System.nanoTime()
+                val result = conn.bulkTransfer(endpoint, message, message.size, WRITE_TIMEOUT)
+                lastWriteElapsedMs = (System.nanoTime() - started) / 1_000_000
+                lastWriteResult = result
+                lastWriteNs.set(System.nanoTime())
+                result == message.size
             }
         }
     }
@@ -97,9 +130,11 @@ class UsbBridgeService : Service() {
 
     override fun onDestroy() {
         closeDevice("service destroyed")
+        realtimeDispatch.shutdownNow()
         super.onDestroy()
     }
 
+    @Synchronized
     private fun openDevice(requested: UsbDevice? = null): Boolean {
         if (running.get()) return true
         // USB_DEVICE_ATTACHED and the UsbManager device list are not updated
@@ -142,14 +177,25 @@ class UsbBridgeService : Service() {
         outEndpoint = endpoints.third
         running.set(true)
         emitState(UsbBridgeConstants.STATE_CONNECTED, "${device.vendorId}:${device.productId}")
-        reader = Thread(::readLoop, "CL-USB-Helper").apply {
+        val generation = deliveryGeneration.incrementAndGet()
+        lastReadNs.set(0)
+        lastWriteNs.set(0)
+        lastAudioReadNs.set(0)
+        maxAudioGapMs.set(0)
+        maxAudioQueueMs.set(0)
+        maxAudioCallbackMs.set(0)
+        lastDeliverySummaryNs.set(System.nanoTime())
+        reader = Thread({ readLoop(conn, endpoints.second, generation, device.deviceName) }, "CL-USB-Helper").apply {
             isDaemon = true
             start()
         }
         return true
     }
 
-    private fun closeDevice(reason: String) {
+    @Synchronized
+    private fun closeDevice(reason: String, expectedGeneration: Long? = null) {
+        if (expectedGeneration != null && expectedGeneration != deliveryGeneration.get()) return
+        deliveryGeneration.incrementAndGet()
         if (!running.getAndSet(false) && connection == null) return
         reader?.interrupt()
         reader = null
@@ -158,59 +204,104 @@ class UsbBridgeService : Service() {
         inEndpoint = null
         outEndpoint = null
         pendingWrites.clear()
+        realtimeDispatch.queue.clear()
         emitState(UsbBridgeConstants.STATE_DISCONNECTED, reason)
     }
 
-    private fun readLoop() {
+    private fun readLoop(conn: UsbDeviceConnection, endpoint: UsbEndpoint, generation: Long, deviceName: String) {
         val header = ByteArray(HEADER_SIZE)
+        var reason = "USB read loop stopped"
         try {
-            while (running.get()) {
-                if (!readExact(header, READ_TIMEOUT)) break
+            while (running.get() && generation == deliveryGeneration.get()) {
+                if (!readExact(conn, endpoint, generation, header, READ_TIMEOUT, "header", deviceName)) break
                 val length = littleEndianInt(header, 4)
                 val type = littleEndianInt(header, 8)
                 if (length !in 0..UsbBridgeConstants.MAX_MESSAGE_SIZE) {
-                    emitState(UsbBridgeConstants.STATE_ERROR, "invalid CPC200 payload length: $length")
+                    reason = "USB invalid CPC200 payload length: $length type=$type"
                     break
                 }
                 val payload = ByteArray(length)
-                if (length > 0 && !readExact(payload, READ_TIMEOUT)) break
+                if (length > 0 && !readExact(conn, endpoint, generation, payload, READ_TIMEOUT, "payload type=$type", deviceName)) break
                 val pts = if (type == VIDEO_TYPE && payload.size >= 16) littleEndianInt(payload, 12) else 0
-                sendInbound(type, pts, payload)
+                sendInbound(type, pts, payload, generation)
             }
         } catch (e: Exception) {
-            if (running.get()) emitState(UsbBridgeConstants.STATE_ERROR, e.message ?: "USB read failed")
+            reason = "USB read failed: ${e.message ?: e.javaClass.simpleName}"
         } finally {
-            if (running.get()) closeDevice("USB read loop stopped")
+            closeDevice(reason, generation)
         }
     }
 
-    private fun readExact(buffer: ByteArray, timeout: Int): Boolean {
+    private fun readExact(conn: UsbDeviceConnection, endpoint: UsbEndpoint, generation: Long, buffer: ByteArray, timeout: Int, phase: String, deviceName: String): Boolean {
         var offset = 0
-        while (offset < buffer.size && running.get()) {
-            val n = connection?.bulkTransfer(inEndpoint, buffer, offset, buffer.size - offset, timeout) ?: -1
-            if (n <= 0) return false
+        while (offset < buffer.size && running.get() && generation == deliveryGeneration.get()) {
+            val started = System.nanoTime()
+            val n = conn.bulkTransfer(endpoint, buffer, offset, buffer.size - offset, timeout)
+            val finished = System.nanoTime()
+            if (generation != deliveryGeneration.get() || !running.get()) return false
+            if (n <= 0) {
+                fun ageMs(time: Long): Long = if (time == 0L) -1 else (finished - time) / 1_000_000
+                val elapsedMs = (finished - started) / 1_000_000
+                val present = usbManager.deviceList.containsKey(deviceName)
+                throw java.io.IOException("phase=$phase result=$n bytes=$offset/${buffer.size} elapsedMs=$elapsedMs timeoutMs=$timeout " +
+                    "timeoutLike=${elapsedMs >= timeout - 250} devicePresent=$present lastReadAgeMs=${ageMs(lastReadNs.get())} " +
+                    "lastWriteAgeMs=${ageMs(lastWriteNs.get())} lastWriteResult=$lastWriteResult lastWriteElapsedMs=$lastWriteElapsedMs " +
+                    "dispatchQueued=${realtimeDispatch.queue.size}")
+            }
+            lastReadNs.set(finished)
             offset += n
         }
-        return offset == buffer.size
+        return offset == buffer.size && generation == deliveryGeneration.get()
     }
 
-    private fun sendInbound(type: Int, pts: Int, payload: ByteArray) {
-        val transferId = nextTransferId++
-        val count = maxOf(1, (payload.size + UsbBridgeConstants.CHUNK_SIZE - 1) / UsbBridgeConstants.CHUNK_SIZE)
-        payload.asList().chunked(UsbBridgeConstants.CHUNK_SIZE).forEachIndexed { index, bytes ->
-            val chunk = bytes.toByteArray()
-            callbacks.forEach { callback ->
-                try {
-                    callback.onInboundChunk(transferId, type, pts, index, count, payload.size, chunk)
-                } catch (_: RemoteException) {
-                    callbacks -= callback
+    private fun sendInbound(type: Int, pts: Int, payload: ByteArray, generation: Long) {
+        val queuedNs = System.nanoTime()
+        if (type == 7) {
+            val previous = lastAudioReadNs.getAndSet(queuedNs)
+            if (previous != 0L) maxAudioGapMs.updateAndGet { maxOf(it, (queuedNs - previous) / 1_000_000) }
+        }
+        val delivery = Runnable {
+            if (running.get() && generation == deliveryGeneration.get()) {
+                val startedNs = System.nanoTime()
+                if (type == 7) maxAudioQueueMs.updateAndGet { maxOf(it, (startedNs - queuedNs) / 1_000_000) }
+                deliverInbound(type, pts, payload, generation)
+                val finishedNs = System.nanoTime()
+                if (type == 7) maxAudioCallbackMs.updateAndGet { maxOf(it, (finishedNs - startedNs) / 1_000_000) }
+                if (finishedNs - lastDeliverySummaryNs.get() >= 30_000_000_000L) {
+                    lastDeliverySummaryNs.set(finishedNs)
+                    emitState(UsbBridgeConstants.STATE_CONNECTED, "[USB_DELIVERY] audioMaxArrivalGapMs=${maxAudioGapMs.getAndSet(0)} " +
+                        "audioMaxQueueWaitMs=${maxAudioQueueMs.getAndSet(0)} audioMaxCallbackMs=${maxAudioCallbackMs.getAndSet(0)} " +
+                        "queued=${realtimeDispatch.queue.size}")
                 }
             }
         }
-        if (payload.isEmpty()) {
+        try {
+            // Preserve wire order across PLUGGED, audio commands and video. A
+            // separate video worker races decoder setup against incoming frames.
+            realtimeDispatch.execute(delivery)
+        } catch (_: RejectedExecutionException) {
+            // Never silently lose H.264 reference frames or queue old call audio
+            // indefinitely. End this session and let the client reconnect.
+            Thread {
+                synchronized(this@UsbBridgeService) {
+                    if (generation != deliveryGeneration.get() || !running.get()) return@synchronized
+                    emitState(UsbBridgeConstants.STATE_ERROR, "USB delivery backlog exceeded limit")
+                    closeDevice("USB delivery backlog", generation)
+                }
+            }.start()
+        }
+    }
+
+    private fun deliverInbound(type: Int, pts: Int, payload: ByteArray, generation: Long) {
+        val transferId = transferIds.getAndIncrement()
+        val count = maxOf(1, (payload.size + UsbBridgeConstants.CHUNK_SIZE - 1) / UsbBridgeConstants.CHUNK_SIZE)
+        for (index in 0 until count) {
+            if (generation != deliveryGeneration.get() || !running.get()) return
+            val offset = index * UsbBridgeConstants.CHUNK_SIZE
+            val chunk = payload.copyOfRange(offset, minOf(payload.size, offset + UsbBridgeConstants.CHUNK_SIZE))
             callbacks.forEach { callback ->
                 try {
-                    callback.onInboundChunk(transferId, type, pts, 0, 1, 0, ByteArray(0))
+                    callback.onInboundChunk(transferId, type, pts, index, count, payload.size, chunk)
                 } catch (_: RemoteException) {
                     callbacks -= callback
                 }
@@ -280,7 +371,7 @@ class UsbBridgeService : Service() {
         private const val READ_TIMEOUT = 30_000
         private const val WRITE_TIMEOUT = 1_000
         private const val VIDEO_TYPE = 0x06
-        private var nextTransferId = 1L
+        private const val NAVI_VIDEO_TYPE = 0x2C
 
         private fun littleEndianInt(data: ByteArray, offset: Int): Int =
             ByteBuffer.wrap(data, offset, 4).order(ByteOrder.LITTLE_ENDIAN).int

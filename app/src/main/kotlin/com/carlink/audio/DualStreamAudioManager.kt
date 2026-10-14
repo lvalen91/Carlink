@@ -181,6 +181,20 @@ class DualStreamAudioManager(
         var residualCount: Int = 0,
         var underruns: Int = 0,
         var tempBuffer: ByteArray,
+        @Volatile var lastPacketNs: Long = 0,
+        val maxPacketGapMs: java.util.concurrent.atomic.AtomicLong = java.util.concurrent.atomic.AtomicLong(),
+        val maxPacketMs: java.util.concurrent.atomic.AtomicLong = java.util.concurrent.atomic.AtomicLong(),
+        var trimmedBytes: Long = 0,
+        val receivedPackets: java.util.concurrent.atomic.AtomicLong = java.util.concurrent.atomic.AtomicLong(),
+        val receivedBytes: java.util.concurrent.atomic.AtomicLong = java.util.concurrent.atomic.AtomicLong(),
+        val silencePackets: java.util.concurrent.atomic.AtomicLong = java.util.concurrent.atomic.AtomicLong(),
+        val silenceSinceNs: AtomicLong = AtomicLong(0),
+        var outputBytes: Long = 0,
+        var zeroWrites: Long = 0,
+        var diagnosticTrack: AudioTrack? = null,
+        var diagnosticHeadFrames: Long = 0,
+        var underrunDiagnosticTrack: AudioTrack? = null,
+        var underrunDiagnosticCount: Int = 0,
         // Stats delta tracking
         var prevOverflow: Int = 0,
         var prevUnderruns: Int = 0,
@@ -196,6 +210,51 @@ class DualStreamAudioManager(
     //     (avoids volume-context flap during natural inter-packet gaps).
     //   - ALERT: actually pause (short bursts with explicit start/end signals).
     private val idlePauseMs = 200L
+    @Volatile private var mediaStopped = false
+    private val mediaTransitionGeneration = java.util.concurrent.atomic.AtomicLong(0)
+    private var appliedMediaTransition = 0L
+    private var diagnosticExecutor: java.util.concurrent.ScheduledExecutorService? = null
+
+    private fun startShortWindowDiagnostics() {
+        diagnosticExecutor?.shutdownNow()
+        val windows = mutableMapOf<StreamPurpose, Pair<AudioTrack, com.carlink.logging.StallWindow>>()
+        var sampleCount = 0
+        diagnosticExecutor = java.util.concurrent.Executors.newSingleThreadScheduledExecutor {
+            Thread(it, "CL-AudioMonitor")
+        }.also { executor ->
+            executor.scheduleAtFixedRate({
+                runCatching {
+                    if (!isRunning.get()) return@runCatching
+                    sampleCount++
+                    val nowNs = System.nanoTime()
+                    for (slot in listOfNotNull(mediaSlot, phoneCallSlot, siriSlot)) {
+                        val track = slot.track ?: continue
+                        val window = windows[slot.purpose]?.takeIf { it.first === track }?.second
+                            ?: com.carlink.logging.StallWindow().also { windows[slot.purpose] = track to it }
+                        val head = track.playbackHeadPosition.toLong() and 0xffffffffL
+                        val active = slot.started && track.playState == AudioTrack.PLAYSTATE_PLAYING &&
+                            (slot.purpose != StreamPurpose.MEDIA || !mediaStopped)
+                        val packetAgeMs = if (slot.lastPacketNs == 0L) -1 else (nowNs - slot.lastPacketNs) / 1_000_000
+                        val silenceNs = slot.silenceSinceNs.get()
+                        val silenceMs = if (silenceNs == 0L) 0 else (nowNs - silenceNs) / 1_000_000
+                        val detail = "purpose=${slot.purpose} active=$active headFrames=$head acceptedTotalB=${slot.buffer.totalBytesWritten} " +
+                            "ringMs=${slot.buffer.fillLevelMs()} residualB=${slot.residualCount} packetAgeMs=$packetAgeMs silenceRunMs=$silenceMs"
+                        val event = window.sample(nowNs / 1_000_000, active, head, detail, packetAgeMs >= 2000 || silenceMs >= 2000)
+                        if (event != null) logPerf("[AUDIO_STALL_WINDOW] $event")
+                        if (sampleCount % 10 == 0 && active) logPerf("[AUDIO_SHORT_SAMPLE] $detail")
+                    }
+                }
+            }, 1, 1, java.util.concurrent.TimeUnit.SECONDS)
+        }
+    }
+
+    fun markMediaActive(active: Boolean) {
+        if (mediaStopped == !active) return
+        mediaStopped = !active
+        if (!active) mediaSlot?.buffer?.clear()
+        val generation = mediaTransitionGeneration.incrementAndGet()
+        logPerf("[MEDIA_TRANSITION] command=${if (active) "START" else "STOP"} generation=$generation")
+    }
 
     // Reject NAVI_COMPLETE if the prompt has been audible for less than this many ms
     // and the buffer still holds >50ms of data — guards against the adapter sending
@@ -238,6 +297,7 @@ class DualStreamAudioManager(
 
                 // Start playback thread
                 playbackThread = AudioPlaybackThread().also { it.start() }
+                startShortWindowDiagnostics()
 
                 val perfModeStr =
                     if (audioConfig.performanceMode == AudioTrack.PERFORMANCE_MODE_LOW_LATENCY) {
@@ -387,11 +447,13 @@ class DualStreamAudioManager(
         if (!isRunning.get()) return -1
 
         // Navigation handles zeros separately for consecutive tracking and buffer flush
-        val isZeroFilled = isZeroFilledAudio(data, dataOffset, dataLength)
-        if (isZeroFilled && audioType != AudioStreamType.NAVIGATION) {
-            windowZeroFiltered.incrementAndGet()
-            return 0
+        val isZeroFilled = if (audioType == AudioStreamType.NAVIGATION) {
+            isZeroFilledAudio(data, dataOffset, dataLength)
+        } else {
+            PcmSamples.isSilent(data, dataOffset, dataLength)
         }
+        // PCM silence carries duration, including music. Never discard media
+        // based on its sample values. Navigation's end handling stays separate.
 
         // Route: Navigation → nav track, everything else → per-purpose pre-allocated track
         return when (audioType) {
@@ -452,11 +514,28 @@ class DualStreamAudioManager(
                 windowMediaRx.incrementAndGet()
                 val format = AudioFormats.fromDecodeType(decodeType)
                 val targetSlot = resolveTargetSlot(format, routingState) ?: return 0
+                if (targetSlot.purpose == StreamPurpose.MEDIA && mediaStopped) return 0
                 ensureSlotFormat(targetSlot, format)
                 // Activate slot if track is not yet playing (pre-allocated slots start in STOPPED)
                 if (!targetSlot.pendingPlay && targetSlot.track?.playState != AudioTrack.PLAYSTATE_PLAYING) {
                     targetSlot.pendingPlay = true
                     targetSlot.started = false
+                }
+                if (targetSlot.purpose == StreamPurpose.PHONE_CALL || targetSlot.purpose == StreamPurpose.MEDIA) {
+                    targetSlot.receivedPackets.incrementAndGet()
+                    targetSlot.receivedBytes.addAndGet(dataLength.toLong())
+                    if (isZeroFilled) targetSlot.silencePackets.incrementAndGet()
+                    if (isZeroFilled) targetSlot.silenceSinceNs.compareAndSet(0, System.nanoTime())
+                    else targetSlot.silenceSinceNs.set(0)
+                    val nowNs = System.nanoTime()
+                    val previousNs = targetSlot.lastPacketNs
+                    targetSlot.lastPacketNs = nowNs
+                    if (previousNs != 0L) {
+                        val gapMs = (nowNs - previousNs) / 1_000_000
+                        targetSlot.maxPacketGapMs.updateAndGet { maxOf(it, gapMs) }
+                    }
+                    val packetMs = dataLength.toLong() * 1000 / (format.sampleRate * format.channelCount * 2)
+                    targetSlot.maxPacketMs.updateAndGet { maxOf(it, packetMs) }
                 }
                 targetSlot.buffer.write(data, dataOffset, dataLength)
             }
@@ -742,22 +821,27 @@ class DualStreamAudioManager(
             slot.residualOffset = 0
             slot.residualCount = 0
             slot.buffer.clear()
+            slot.lastPacketNs = 0
         }
     }
 
     /** Stop playback and release all resources. */
     fun release() {
+        diagnosticExecutor?.shutdownNow()
+        diagnosticExecutor = null
+        val thread = synchronized(lock) {
+            isRunning.set(false)
+            playbackThread.also { playbackThread = null }
+        }
+        // Playback can need lock for track recovery; do not join it while holding lock.
+        thread?.interrupt()
+        try {
+            thread?.join(1000)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
         synchronized(lock) {
             log("[AUDIO] Releasing DualStreamAudioManager")
-
-            isRunning.set(false)
-
-            playbackThread?.interrupt()
-            try {
-                playbackThread?.join(1000)
-            } catch (_: InterruptedException) {
-            }
-            playbackThread = null
 
             releaseSlot(mediaSlot)
             releaseSlot(siriSlot)
@@ -794,7 +878,7 @@ class DualStreamAudioManager(
     ): PurposeSlot {
         val buffer =
             AudioRingBuffer(
-                capacityMs = audioConfig.mediaBufferCapacityMs,
+                capacityMs = if (purpose == StreamPurpose.PHONE_CALL || purpose == StreamPurpose.SIRI) 120 else audioConfig.mediaBufferCapacityMs,
                 sampleRate = format.sampleRate,
                 channels = format.channelCount,
             )
@@ -809,7 +893,7 @@ class DualStreamAudioManager(
             purpose = purpose,
             track = track,
             buffer = buffer,
-            tempBuffer = ByteArray(chunkSize * 20),
+            tempBuffer = ByteArray(chunkSize * if (purpose == StreamPurpose.PHONE_CALL) 4 else 20),
         )
     }
 
@@ -839,7 +923,7 @@ class DualStreamAudioManager(
             if (routeRepeatCount > 0) {
                 logDebug("[AUDIO_ROUTE] (suppressed $routeRepeatCount identical)")
             }
-            logDebug(
+            log(
                 "[AUDIO_ROUTE] ${format.sampleRate}Hz/${format.channelCount}ch " +
                     "state=(call=${state.isPhoneCallActive} siri=${state.isSiriActive} alert=${state.isAlertActive}) " +
                     "→ ${purpose ?: "null"}",
@@ -878,12 +962,12 @@ class DualStreamAudioManager(
                 slot.format = incomingFormat
                 slot.buffer =
                     AudioRingBuffer(
-                        capacityMs = audioConfig.mediaBufferCapacityMs,
+                        capacityMs = if (slot.purpose == StreamPurpose.PHONE_CALL || slot.purpose == StreamPurpose.SIRI) 120 else audioConfig.mediaBufferCapacityMs,
                         sampleRate = incomingFormat.sampleRate,
                         channels = incomingFormat.channelCount,
                     )
                 val chunkSize = incomingFormat.sampleRate * incomingFormat.channelCount * 2 * 5 / 1000
-                slot.tempBuffer = ByteArray(chunkSize * 20)
+                slot.tempBuffer = ByteArray(chunkSize * if (slot.purpose == StreamPurpose.PHONE_CALL) 4 else 20)
                 slot.track = createAudioTrack(incomingFormat, slot.purpose)
                 slot.started = false
                 slot.pendingPlay = true
@@ -977,7 +1061,8 @@ class DualStreamAudioManager(
                 return null
             }
 
-            val bufferSize = minBufferSize * bufferMultiplier
+            val bufferSize = minBufferSize *
+                (if (purpose == StreamPurpose.PHONE_CALL || purpose == StreamPurpose.SIRI) 2 else bufferMultiplier)
 
             val (usage, contentType) = purposeToAttributes(purpose)
 
@@ -1102,18 +1187,70 @@ class DualStreamAudioManager(
                     // === Process all pre-allocated purpose slots ===
                     val slotsSnapshot = listOfNotNull(mediaSlot, siriSlot, phoneCallSlot, alertSlot)
 
-                    for (slot in slotsSnapshot) {
+                    slotLoop@ for (slot in slotsSnapshot) {
                         val track = slot.track ?: continue
+                        if (slot.purpose == StreamPurpose.MEDIA) {
+                            val transition = mediaTransitionGeneration.get()
+                            if (transition != appliedMediaTransition) {
+                                track.pause()
+                                track.flush()
+                                slot.residualCount = 0
+                                slot.residualOffset = 0
+                                slot.started = false
+                                slot.idleSince = 0
+                                slot.pendingPlay = !mediaStopped
+                                if (mediaStopped) slot.buffer.clear()
+                                appliedMediaTransition = transition
+                                logPerf("[MEDIA_TRANSITION] applied generation=$transition stopped=$mediaStopped bufferMs=${slot.buffer.fillLevelMs()}")
+                            }
+                        }
+                        // Observe before empty-buffer/partial-write early exits, which
+                        // are precisely where starvation otherwise escapes diagnostics.
+                        if (slot.purpose == StreamPurpose.MEDIA) {
+                            if (slot.underrunDiagnosticTrack !== track) {
+                                slot.underrunDiagnosticTrack = track
+                                slot.underrunDiagnosticCount = 0
+                            }
+                            val count = track.underrunCount
+                            val delta = (count - slot.underrunDiagnosticCount).coerceAtLeast(0)
+                            slot.underrunDiagnosticCount = count
+                            if (delta > 0) {
+                                val phase = when {
+                                    mediaStopped -> "intentional-stop"
+                                    track.playState != AudioTrack.PLAYSTATE_PLAYING -> "inactive"
+                                    slot.pendingPlay || !slot.started -> "prefill"
+                                    (track.playbackHeadPosition.toLong() and 0xffffffffL) < slot.format.sampleRate * 2L -> "startup"
+                                    else -> "playing"
+                                }
+                                logPerf("[MUSIC_UNDERRUN] delta=$delta phase=$phase ringMs=${slot.buffer.fillLevelMs()} residualB=${slot.residualCount} " +
+                                    "packetAgeMs=${if (slot.lastPacketNs == 0L) -1 else (System.nanoTime() - slot.lastPacketNs) / 1_000_000}")
+                            }
+                        }
                         if (track.playState != AudioTrack.PLAYSTATE_PLAYING && !slot.pendingPlay) {
                             continue
                         }
 
                         val buffer = slot.buffer
+                        if (slot.purpose == StreamPurpose.PHONE_CALL) {
+                            // Bound software backlog, including the older partial-write tail.
+                            // Android-owned queued samples cannot be safely discarded here.
+                            val bytesPerMs = slot.format.sampleRate * slot.format.channelCount * 2 / 1000
+                            val pendingBytes = buffer.availableForRead() + slot.residualCount
+                            if (pendingBytes > bytesPerMs * 100) {
+                                slot.trimmedBytes += slot.residualCount
+                                slot.residualCount = 0
+                                slot.residualOffset = 0
+                                slot.trimmedBytes += buffer.discardOldest(
+                                    (buffer.availableForRead() - bytesPerMs * 60).coerceAtLeast(0),
+                                )
+                            }
+                        }
                         val currentFillMs = buffer.fillLevelMs()
 
                         // Pre-fill before first playback
                         if (!slot.started) {
-                            if (currentFillMs < prefillThresholdMs) continue
+                            val requiredPrefill = if (slot.purpose == StreamPurpose.PHONE_CALL || slot.purpose == StreamPurpose.SIRI) 20 else prefillThresholdMs
+                            if (currentFillMs < requiredPrefill) continue
                             slot.started = true
                             if (slot.pendingPlay) {
                                 while (buffer.fillLevelMs() > minBufferLevelMs) {
@@ -1133,8 +1270,14 @@ class DualStreamAudioManager(
                                             bytesRead,
                                             AudioTrack.WRITE_NON_BLOCKING,
                                         )
-                                    if (written <= 0) break
+                                    if (written < 0) {
+                                        handleTrackError(slot.purpose.name, written, slot)
+                                        slot.started = false
+                                        continue@slotLoop
+                                    }
                                     windowMediaPlayed.addAndGet(written.toLong())
+                                    slot.outputBytes += written
+                                    if (written == 0) slot.zeroWrites++
                                     if (written < bytesRead) {
                                         slot.residualOffset = written
                                         slot.residualCount = bytesRead - written
@@ -1168,10 +1311,12 @@ class DualStreamAudioManager(
                             }
                             if (written > 0) {
                                 windowMediaPlayed.addAndGet(written.toLong())
+                                slot.outputBytes += written
                                 slot.residualOffset += written
                                 slot.residualCount -= written
                                 didWork = true
                             }
+                            if (written == 0) slot.zeroWrites++
                         }
 
                         // Skip new reads while residual pending or buffer empty
@@ -1250,7 +1395,9 @@ class DualStreamAudioManager(
                                     }
                                     if (written > 0) {
                                         windowMediaPlayed.addAndGet(written.toLong())
+                                        slot.outputBytes += written
                                     }
+                                    if (written == 0) slot.zeroWrites++
                                     if (written < bytesRead) {
                                         slot.residualOffset = written
                                         slot.residualCount = bytesRead - written
@@ -1469,6 +1616,28 @@ class DualStreamAudioManager(
                             val urunDelta = slot.underruns - slot.prevUnderruns
                             slot.prevUnderruns = slot.underruns
                             mUrun += urunDelta
+                            sb.append("{ovf=").append(ovfDelta)
+                                .append(" urun=").append(urunDelta)
+                                .append(" residualB=").append(slot.residualCount).append("}")
+                            if (slot.purpose == StreamPurpose.PHONE_CALL || slot.purpose == StreamPurpose.MEDIA) {
+                                val track = slot.track
+                                val head = track?.playbackHeadPosition?.toLong()?.and(0xffffffffL) ?: 0
+                                val replaced = slot.diagnosticTrack !== track
+                                val headDelta = if (replaced || head < slot.diagnosticHeadFrames) 0 else head - slot.diagnosticHeadFrames
+                                slot.diagnosticTrack = track
+                                slot.diagnosticHeadFrames = head
+                                val diagnosticName = if (slot.purpose == StreamPurpose.MEDIA) "MUSIC_PLAYBACK" else "CALL_PLAYBACK"
+                                logPerf("[$diagnosticName] pendingMs=${fill + slot.residualCount * 1000 / (slot.format.sampleRate * slot.format.channelCount * 2)} " +
+                                    "maxPacketMs=${slot.maxPacketMs.getAndSet(0)} maxGapMs=${slot.maxPacketGapMs.getAndSet(0)} " +
+                                    "receivedPackets=${slot.receivedPackets.getAndSet(0)} receivedB=${slot.receivedBytes.getAndSet(0)} " +
+                                    "silencePackets=${slot.silencePackets.getAndSet(0)} acceptedTotalB=${slot.buffer.totalBytesWritten} " +
+                                    "outputB=${slot.outputBytes} headFrames=${slot.track?.playbackHeadPosition} " +
+                                    "headDeltaFrames=$headDelta trackChanged=$replaced " +
+                                    "zeroWrites=${slot.zeroWrites} trimmedB=${slot.trimmedBytes}")
+                                slot.outputBytes = 0
+                                slot.zeroWrites = 0
+                                slot.trimmedBytes = 0
+                            }
                         }
 
                         sb

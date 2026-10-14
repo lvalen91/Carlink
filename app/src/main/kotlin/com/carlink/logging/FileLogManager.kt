@@ -9,6 +9,8 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -44,6 +46,7 @@ class FileLogManager internal constructor(
 
     companion object {
         private const val MAX_FILE_SIZE = 5 * 1024 * 1024L // 5MB
+        private const val MAX_TOTAL_SIZE = 40 * 1024 * 1024L
         private const val RETENTION_DAYS = 7
         private const val LOGS_DIR = "logs"
         private const val FLUSH_INTERVAL_MS = 1000L
@@ -75,6 +78,7 @@ class FileLogManager internal constructor(
     private val writerLock = ReentrantLock()
 
     private val logQueue = ConcurrentLinkedQueue<String>()
+    private val queueLock = Any()
     private val queueSize = AtomicInteger(0)
     private val executor = Executors.newSingleThreadScheduledExecutor()
     private val isEnabled = AtomicBoolean(false)
@@ -179,6 +183,36 @@ class FileLogManager internal constructor(
 
     fun getTotalLogSize(): Long = getLogFiles().sumOf { it.length() }
 
+    data class PurgeResult(val deleted: Int, val failed: List<String>)
+
+    /** Deletes only app-private diagnostics, never USB exports or user settings. */
+    @Synchronized
+    fun purgeAllLogs(): PurgeResult {
+        val resumeLogging = isEnabled.get()
+        disable()
+        try {
+            return writerLock.withLock {
+                closeWriterLocked()
+                synchronized(queueLock) {
+                    logQueue.clear()
+                    queueSize.set(0)
+                }
+                DiagnosticStorage.purge {
+                    var deleted = 0
+                    val failed = mutableListOf<String>()
+                    for (file in getLogFiles()) {
+                        if (file.delete()) deleted++ else failed += file.name
+                    }
+                    val archive = File(appContext.cacheDir, "carlink-diagnostics.zip")
+                    if (archive.exists() && !archive.delete()) failed += archive.name
+                    PurgeResult(deleted, failed)
+                }
+            }
+        } finally {
+            if (resumeLogging) enable()
+        }
+    }
+
     fun getCurrentLogFileSize(): Long = writerLock.withLock { currentLogFile?.length() ?: 0L }
 
     /**
@@ -188,6 +222,33 @@ class FileLogManager internal constructor(
      */
     fun flush() {
         flushQueueInternal()
+    }
+
+    /** Take a consistent snapshot for export without holding the writer lock during USB copying. */
+    fun createExportArchive(): File {
+        flush()
+        return writerLock.withLock {
+            val archive = File(appContext.cacheDir, "carlink-diagnostics.zip")
+            ZipOutputStream(FileOutputStream(archive)).use { zip ->
+                getLogFiles().forEach { file ->
+                    zip.putNextEntry(ZipEntry(file.name))
+                    file.inputStream().use { it.copyTo(zip) }
+                    zip.closeEntry()
+                }
+            }
+            archive
+        }
+    }
+
+    private fun enforceStorageLimitLocked() {
+        val files = getLogFiles()
+        var total = files.sumOf { it.length() }
+        for (file in files.asReversed()) {
+            if (total <= MAX_TOTAL_SIZE) break
+            if (file == currentLogFile) continue
+            val size = file.length()
+            if (file.delete()) total -= size
+        }
     }
 
     // Called synchronously by Logger.log() on the caller's thread — can be ANY thread
@@ -201,6 +262,7 @@ class FileLogManager internal constructor(
         timestamp: Long,
     ) {
         if (!isEnabled.get()) return
+        val generation = DiagnosticStorage.generation()
         if (queueSize.get() >= MAX_QUEUE_SIZE) {
             // Throttled warning: at most once per 5s
             val now = System.currentTimeMillis()
@@ -216,8 +278,11 @@ class FileLogManager internal constructor(
         val tagStr = tag?.let { "[$it] " } ?: ""
         val line = "$formattedTime $levelStr $tagStr$message\n"
 
-        logQueue.offer(line)
-        queueSize.incrementAndGet()
+        synchronized(queueLock) {
+            if (!isEnabled.get() || generation != DiagnosticStorage.generation()) return
+            logQueue.offer(line)
+            queueSize.incrementAndGet()
+        }
     }
 
     // Internal flush called by executor - uses lock for writer access.
@@ -255,6 +320,7 @@ class FileLogManager internal constructor(
                             closeWriterLocked()
                             createNewLogFileLocked()
                             writeHeaderLocked()
+                            enforceStorageLimitLocked()
                             android.util.Log.i("CARLINK", "[FILE_LOG] Rotated — new file: ${currentLogFile?.name}")
                         }
                     }
@@ -268,6 +334,7 @@ class FileLogManager internal constructor(
     // Must be called with writerLock held
     private fun createNewLogFileLocked() {
         closeWriterLocked()
+        enforceStorageLimitLocked()
 
         val fileName = "${sessionId}_${System.currentTimeMillis()}.log"
         currentLogFile = File(logsDir, fileName)

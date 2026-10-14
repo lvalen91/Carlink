@@ -56,6 +56,7 @@ class AdapterDriver(
     private val heartbeatInterval = 2000L // 2 seconds
 
     private val isRunning = AtomicBoolean(false)
+    private val sessionGeneration = java.util.concurrent.atomic.AtomicLong(0)
 
     // Performance tracking — atomic because send() is called from multiple threads
     // (heartbeat timer, mic capture timer, main thread) and the reading loop callback
@@ -97,6 +98,7 @@ class AdapterDriver(
         }
 
         sessionStart.set(System.currentTimeMillis())
+        val generation = sessionGeneration.incrementAndGet()
         log("Starting adapter connection sequence")
 
         if (!usbDevice.isOpened) {
@@ -107,56 +109,62 @@ class AdapterDriver(
         }
 
         // Start heartbeat FIRST for firmware stabilization
-        startHeartbeat()
+        synchronized(this) {
+            if (!isRunning.get() || generation != sessionGeneration.get()) return false
+            startHeartbeat()
+        }
         log("Heartbeat started before initialization (firmware stabilization)")
 
         // Send initialization sequence based on mode
         val initMessages = MessageSerializer.generateInitSequence(config, initMode, pendingChanges, surfaceWidth, surfaceHeight)
-        initMessagesCount = initMessages.size
-        var initFailures = 0
+        val messageCount = initMessages.size
+        initMessagesCount = messageCount
         log("Sending $initMessagesCount initialization messages (mode=$initMode, changes=$pendingChanges)")
 
         for ((index, message) in initMessages.withIndex()) {
-            log("Init message ${index + 1}/$initMessagesCount")
+            if (!isRunning.get() || generation != sessionGeneration.get()) return false
+            log("Init message ${index + 1}/$messageCount")
             if (!send(message)) {
-                initFailures++
                 log("Failed to send init message ${index + 1}")
+                return false
             }
             // Delay between messages to allow adapter firmware to process each one
             Thread.sleep(120)
         }
 
-        val allSent = initFailures == 0
-        log("Initialization sequence completed (${initMessagesCount - initFailures}/$initMessagesCount sent)")
+        synchronized(this) {
+            if (!isRunning.get() || generation != sessionGeneration.get()) return false
+            log("Initialization sequence completed ($messageCount/$messageCount sent)")
 
-        // Schedule wifiConnect with timeout (600 ms delay derived from capture traces
-        // under documents/reference/).
-        wifiConnectTimer =
-            Timer().apply {
-                schedule(
-                    object : TimerTask() {
-                        override fun run() {
-                            if (isRunning.get()) {
-                                log("Sending wifiConnect command (timeout-based)")
-                                send(MessageSerializer.serializeCommand(CommandMapping.WIFI_CONNECT))
+            // Publish asynchronous workers atomically with respect to stop().
+            wifiConnectTimer =
+                Timer().apply {
+                    schedule(
+                        object : TimerTask() {
+                            override fun run() {
+                                if (isRunning.get() && generation == sessionGeneration.get()) {
+                                    log("Sending wifiConnect command (timeout-based)")
+                                    send(MessageSerializer.serializeCommand(CommandMapping.WIFI_CONNECT))
+                                }
                             }
-                        }
-                    },
-                    600,
-                )
-            }
+                        },
+                        600,
+                    )
+                }
 
-        // Start reading loop
-        log("Starting message reading loop")
-        startReadingLoop()
+            log("Starting message reading loop")
+            startReadingLoop(generation)
+        }
 
-        return allSent
+        return true
     }
 
     /**
      * Stop the adapter communication.
      */
+    @Synchronized
     fun stop() {
+        sessionGeneration.incrementAndGet()
         if (!isRunning.getAndSet(false)) {
             return
         }
@@ -379,7 +387,7 @@ class AdapterDriver(
         heartbeatTimer = null
     }
 
-    private fun startReadingLoop() {
+    private fun startReadingLoop(generation: Long) {
         usbDevice.startReadingLoop(
             object : UsbTransport.ReadingLoopCallback {
                 override fun onMessage(
@@ -387,6 +395,7 @@ class AdapterDriver(
                     data: ByteArray?,
                     dataLength: Int,
                 ) {
+                    if (!isRunning.get() || generation != sessionGeneration.get()) return
                     messagesReceived.incrementAndGet()
                     bytesReceived.addAndGet((dataLength + HEADER_SIZE).toLong())
 
@@ -442,6 +451,7 @@ class AdapterDriver(
                 }
 
                 override fun onError(error: String) {
+                    if (!isRunning.get() || generation != sessionGeneration.get()) return
                     receiveErrors.incrementAndGet()
                     log("Reading loop error: $error")
                     errorHandler(error)

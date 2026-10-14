@@ -1,7 +1,7 @@
 package com.carlink.audio
 
 /**
- * Lock-free ring buffer for audio jitter compensation.
+ * Ring buffer for audio jitter compensation.
  *
  * PURPOSE:
  * Decouples producer from consumer to absorb irregular packet arrival.
@@ -13,8 +13,8 @@ package com.carlink.audio
  * configurations:
  * - Playback (DualStreamAudioManager): producer = USB ingest, consumer = AudioTrack writer.
  * - Microphone (MicrophoneCaptureManager): producer = AudioRecord reader, consumer = USB streamer.
- * Synchronization is via volatile cursors only. See [write] for a documented
- * SPSC violation in the overflow path.
+ * Short synchronized copy operations protect cursor updates during overflow,
+ * microphone trimming, and buffer clearing. No audio device I/O holds this lock.
  *
  * SAMPLE ALIGNMENT:
  * When discarding oldest data during overflow, bytes are aligned to PCM frame
@@ -73,6 +73,7 @@ class AudioRingBuffer(
      *   Realistic chunks (~30ms) are well under buffer capacity (≥100ms) so this
      *   edge does not occur in practice.
      */
+    @Synchronized
     fun write(
         data: ByteArray,
         offset: Int = 0,
@@ -83,11 +84,7 @@ class AudioRingBuffer(
         // Overwrite-oldest: discard oldest data when full (prevents buffer-full stalls)
         // Align discard to PCM frame boundary to prevent audio corruption
         // (channel phase shift, clicking/popping artifacts)
-        // NOTE: Advancing readPos from the writer violates strict SPSC — if the reader
-        // captured a stale localReadPos, its next update may undo this advance, causing
-        // brief replay of discarded data (~1 packet). Acceptable for projection audio
-        // in an already-degraded overflow state. Alternatives (lock, CAS, drop-newest)
-        // add complexity or are wrong for live audio.
+        // The copy lock prevents a concurrent reader from undoing this advance.
         if (available < length) {
             val minDiscard = length - available
             // Round up to nearest frame boundary for proper sample alignment
@@ -119,6 +116,7 @@ class AudioRingBuffer(
      * Read data from ring buffer (non-blocking).
      * @return Bytes read (may be less than length if buffer empty)
      */
+    @Synchronized
     fun read(
         out: ByteArray,
         offset: Int = 0,
@@ -146,6 +144,27 @@ class AudioRingBuffer(
         return toRead
     }
 
+    /**
+     * Discard the oldest complete PCM frames without copying them out.
+     * Used by live microphone capture to prevent delayed USB writes from turning
+     * into an ever-growing conversational latency.
+     */
+    @Synchronized
+    fun discardOldest(length: Int): Int {
+        val available = availableForRead()
+        if (available <= 0 || length <= 0) return 0
+
+        val alignedLength =
+            minOf(available, (length / bytesPerFrame) * bytesPerFrame)
+        if (alignedLength <= 0) return 0
+
+        readPos = (readPos + alignedLength) % capacity
+        totalBytesRead += alignedLength
+        discardedBytes += alignedLength
+        return alignedLength
+    }
+
+    @Synchronized
     fun availableForRead(): Int {
         val w = writePos
         val r = readPos
@@ -163,13 +182,9 @@ class AudioRingBuffer(
     /**
      * Reset both cursors to 0.
      *
-     * Best-effort: writes to [writePos] and [readPos] are not atomic relative to
-     * a concurrent [write] or [read], so a concurrent caller may briefly observe
-     * a stale [availableForRead] before stabilizing. Callers in
-     * DualStreamAudioManager invoke this from active paths (slot teardown,
-     * navigation re-plan) accepting that brief inconsistency rather than fully
-     * stopping the consumer thread.
+     * Serialized against copying and microphone trimming.
      */
+    @Synchronized
     fun clear() {
         writePos = 0
         readPos = 0

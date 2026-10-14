@@ -103,11 +103,38 @@ internal fun LogsTabContent(
     var logFiles by remember { mutableStateOf(emptyList<File>()) }
     var showDeleteDialog by remember { mutableStateOf<File?>(null) }
     var showLogLevelDialog by remember { mutableStateOf(false) }
+    var showPurgeDialog by remember { mutableStateOf(false) }
+    var isPurging by remember { mutableStateOf(false) }
     var showDebugWarningDialog by remember { mutableStateOf(false) }
     val colorScheme = MaterialTheme.colorScheme
 
     var pendingExportFile by remember { mutableStateOf<File?>(null) }
     var isExporting by remember { mutableStateOf(false) }
+
+    val archiveLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip"),
+    ) { uri ->
+        if (uri == null) {
+            isExporting = false
+        } else {
+            scope.launch {
+                try {
+                    val archive = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        fileLogManager!!.createExportArchive()
+                    }
+                    FileExportService.writeFileToUri(context, uri, archive)
+                        .onSuccess { Toast.makeText(context, "Diagnostic logs exported", Toast.LENGTH_SHORT).show() }
+                        .onFailure { Toast.makeText(context, "Export failed: ${it.message}", Toast.LENGTH_LONG).show() }
+                } catch (error: kotlinx.coroutines.CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    Toast.makeText(context, "Export failed: ${error.message}", Toast.LENGTH_LONG).show()
+                } finally {
+                    isExporting = false
+                }
+            }
+        }
+    }
 
     val createDocumentLauncher =
         rememberLauncherForActivityResult(
@@ -194,6 +221,24 @@ internal fun LogsTabContent(
                     .padding(24.dp),
             verticalArrangement = Arrangement.spacedBy(24.dp),
         ) {
+            Button(enabled = !isExporting && !isPurging, onClick = {
+                isExporting = true
+                try {
+                    archiveLauncher.launch("carlink-diagnostics-${System.currentTimeMillis()}.zip")
+                } catch (error: Exception) {
+                    isExporting = false
+                    Toast.makeText(context, "Storage picker unavailable: ${error.message}", Toast.LENGTH_LONG).show()
+                }
+            }) {
+                Text(if (isExporting) "Exporting logs…" else "Export all logs to USB / storage")
+            }
+            Button(
+                enabled = fileLogManager != null && !isExporting && !isPurging,
+                onClick = { showPurgeDialog = true },
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+            ) {
+                Text(if (isPurging) "Purging logs…" else "Purge all logs")
+            }
             LoggingControlCard(
                 title = "File Logging",
                 icon = Icons.AutoMirrored.Filled.Article,
@@ -461,6 +506,36 @@ internal fun LogsTabContent(
     }
 
     // Delete Confirmation Dialog
+    if (showPurgeDialog) {
+        AlertDialog(
+            onDismissRequest = { showPurgeDialog = false },
+            title = { Text("Purge all saved logs?") },
+            text = { Text("Permanently delete all app log files, including crash, exit, assistant and stall diagnostics. USB exports and settings are not affected. If logging is enabled, a fresh log will start.") },
+            dismissButton = { TextButton(onClick = { showPurgeDialog = false }) { Text("Cancel") } },
+            confirmButton = {
+                TextButton(onClick = {
+                    showPurgeDialog = false
+                    isPurging = true
+                    scope.launch {
+                        try {
+                            val result = withContext(Dispatchers.IO) { fileLogManager?.purgeAllLogs() }
+                            logFiles = withContext(Dispatchers.IO) { fileLogManager?.getLogFiles() ?: emptyList() }
+                            val message = if (result != null && result.failed.isEmpty()) "Purged ${result.deleted} log files"
+                                else "Some logs could not be deleted"
+                            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                        } catch (e: kotlinx.coroutines.CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            Toast.makeText(context, "Log purge failed: ${e.message}", Toast.LENGTH_LONG).show()
+                        } finally {
+                            isPurging = false
+                        }
+                    }
+                }) { Text("Purge permanently") }
+            },
+        )
+    }
+
     showDeleteDialog?.let { file ->
         val fileSizeStr = formatFileSize(file.length())
 
