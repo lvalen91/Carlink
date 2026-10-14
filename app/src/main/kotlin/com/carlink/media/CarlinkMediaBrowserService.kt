@@ -188,7 +188,7 @@ class CarlinkMediaBrowserService : MediaLibraryService() {
             "Connection Status",
             NotificationManager.IMPORTANCE_LOW, // silent; adapter-connected indicator
         ).apply {
-            description = "Shows when Carlink adapter is connected"
+            description = "Shows when Carlink box is connected"
             setShowBadge(false)
             lockscreenVisibility = Notification.VISIBILITY_PUBLIC
         }
@@ -207,7 +207,7 @@ class CarlinkMediaBrowserService : MediaLibraryService() {
         )
         return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
             .setContentTitle(currentTitle ?: "Carlink")
-            .setContentText(currentArtist ?: "Adapter connected")
+            .setContentText(currentArtist ?: "Box connected")
             .setSmallIcon(R.mipmap.ic_launcher)
             .setOngoing(true)
             .setSilent(true)

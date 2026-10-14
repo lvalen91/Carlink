@@ -64,3 +64,15 @@ adb shell getenforce
 Why This Works
 
 The Android emulator QEMU binary on macOS includes usb-host backend (host-libusb.c), IOUSBHost.framework, com.apple.security.device-access entitlement, and the -usb-passthrough flag. The CPC200-CCPA is a vendor-specific USB device (class 0xFF, subclass 0xF0) with no macOS kernel driver, so libusb hands it to QEMU without conflict.
+
+Low-Resolution Testing (800x480 / 480x800)
+
+Verified: 2026-10-13, same emulator/adapter setup above, `-skin 800x480` override on the `ultrawide` AVD.
+
+CarPlay renders correctly at 800x480 and 480x800 — full layout, no clipping, no overlap. Low resolution is not a CarPlay/carlink_native problem.
+
+Android Auto renders but its own projected UI clips/overlaps itself at this resolution — this is Google's Android Auto projection host, not the app or carlink_native. Observed:
+- Left dock (non-fullscreen): the app shortcut icon sits behind the clock and partially over the signal icons.
+- Fullscreen: the dock auto-shifts to the bottom and most elements align correctly, but the Gemini prompt bar at the bottom does not render properly.
+
+Conclusion: both CarPlay and Android Auto CAN reach resolutions as low as 800x480, but it is NOT recommended, specifically for Android Auto — Google's own Android Auto projection UI no longer scales/adjusts properly below its expected minimum, independent of anything carlink_native does. Don't treat AA clipping/overlap at very low resolutions as an app bug without first confirming it reproduces the same way on a stock/unmodified AAOS target.

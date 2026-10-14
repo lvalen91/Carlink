@@ -158,6 +158,19 @@ class CarlinkManager(
     // Config can be updated when actual surface dimensions are known
     private var config: AdapterConfig = initialConfig
 
+    /** The WiFi/BT name the adapter is configured to advertise — what a phone connects to. */
+    val adapterName: String get() = config.boxName
+
+    /**
+     * Latest user-facing phase string handed to [setStatusText] ("Searching for box...",
+     * "Streaming", "Reconnecting (2/5)...", ...). A pollable mirror of
+     * [Callback.onStatusTextChanged] for observers that cannot own the single-slot [callback]
+     * (the settings dashboard's SessionSnapshot). Written on whichever thread drives the state
+     * machine and read on the main thread, so @Volatile like [currentPhoneType]/[currentWifi].
+     */
+    @Volatile var statusText: String = ""
+        private set
+
     companion object {
         /**
          * Serializes [start] across ALL CarlinkManager instances in the process. Two starts on
@@ -216,17 +229,17 @@ class CarlinkManager(
         //
         //   Pattern A — "no initial response" errors in a row (consecutiveNoResponse >= 2).
         //               The adapter's USB write path appears dead; retrying won't help.
-        //               Surfaced as "Adapter not responding — reboot adapter".
+        //               Surfaced as "Box not responding — reboot box".
         //
         //   Pattern B — SCANNING_DEVICE command arrives after a prior PLUGGED session
         //               (hadPriorSession && reconnectAttempts > 0). The adapter is alive
         //               and scanning but the phone isn't coming back — wireless subsystem
-        //               may be stuck. Surfaced as "Adapter scanning — phone not reconnecting".
+        //               may be stuck. Surfaced as "Box scanning — phone not reconnecting".
         //
         //   Pattern C — STREAMING sessions that die within SHORT_SESSION_THRESHOLD_MS,
         //               SHORT_SESSION_ESCALATION_COUNT times in a row → "connection unstable"
         //               (likely ZLP or firmware instability). Surfaced as
-        //               "Connection unstable — reboot adapter".
+        //               "Connection unstable — reboot box".
         //
         // Keep these labels/thresholds stable; remote logs filter on the "[ESCALATION]" tag.
         // ---------------------------------------------------------------------------------
@@ -960,7 +973,7 @@ class CarlinkManager(
             setupAbort = SetupAbort.NONE
 
             setState(State.CONNECTING)
-            setStatusText("Searching for adapter...")
+            setStatusText("Searching for box...")
             resetUnknownCounters()
 
             // Reset video renderer (only if initialized and codec is active).
@@ -992,13 +1005,13 @@ class CarlinkManager(
         if (device == null) {
             logError("Failed to find Carlinkit device", tag = Logger.Tags.USB)
             setState(State.DISCONNECTED)
-            setStatusText("Adapter not found")
+            setStatusText("Box not found")
             return
         }
 
         log("Device found, opening")
         usbDevice = device
-        setStatusText("Adapter found — opening...")
+        setStatusText("Box found — opening...")
 
         // AltVideo (USB 0x2C) gate — evaluated each session start (cheap; PlatformDetector
         // caches its codec scan per process). Both checks must pass:
@@ -1104,7 +1117,7 @@ class CarlinkManager(
         log("[INIT] Mode: ${adapterConfigPref.getInitializationInfo(currentVersionCode)}")
         log("[INIT] Audio mode: ${if (refreshedConfig.audioTransferMode) "BLUETOOTH" else "ADAPTER"}")
 
-        setStatusText("Initializing adapter...")
+        setStatusText("Initializing box...")
         val initSuccess = adapterDriver?.start(refreshedConfig, initMode.name, pendingChanges, actualSurfaceWidth, actualSurfaceHeight) ?: false
         // Teardown requested during the paced init sequence: skip the tail (targeted-connect
         // override, init bookkeeping, pair timer); finishSetup stops the driver it just started.
@@ -1468,7 +1481,7 @@ class CarlinkManager(
         //
         // NOTE: `hadPriorSession` is intentionally NOT reset here (it's only reset in
         // stop()). Preserving it keeps Pattern A/B/C escalation context across mid-session
-        // failures, so a user who hits "reboot adapter" after several short sessions still
+        // failures, so a user who hits "reboot box" after several short sessions still
         // gets the right escalation messaging on the next attempt.
         //
         // Known gap: cancelDelayedKeyframe() is NOT called here. Any pending CarPlay periodic
@@ -1813,17 +1826,18 @@ class CarlinkManager(
         // Released: the MediaSession is app-scope and shared with the replacement manager —
         // a straggler's status text must not overwrite its placeholder.
         if (released) return
+        statusText = text
         callback?.onStatusTextChanged(text)
         // Mirror status text to MediaSession placeholder so cluster, cardview, and
         // CarMediaApp surfaces all show the same user-facing state the main app UI
         // shows as the adapter transitions through DISCONNECTED → CONNECTING →
-        // DEVICE_CONNECTED phases (Searching for adapter, Initializing, Waiting
+        // DEVICE_CONNECTED phases (Searching for box, Initializing, Waiting
         // for phone, Phone connected, Reconnecting, etc.). Single source of truth.
         //
         // Gate on state != STREAMING — once real CarPlay/AA track metadata is
         // flowing via processMediaMetadata → MediaSessionManager.publishMetadata,
         // status text would clobber the live track title/artist. The setStatusText
-        // call sites during STREAMING (e.g. "Adapter not responding — reconnecting")
+        // call sites during STREAMING (e.g. "Box not responding — reconnecting")
         // are state-recovery transitions where placeholder text is no longer
         // appropriate; the next state transition (back to CONNECTING) will rearm
         // the mirror.
@@ -2162,7 +2176,7 @@ class CarlinkManager(
                     if (hadPriorSession && reconnectAttempts > 0) {
                         // Pattern B: adapter alive and scanning, but phone lost after a prior session.
                         // Adapter's wireless subsystem may be stuck.
-                        setStatusText("Adapter scanning — phone not reconnecting")
+                        setStatusText("Box scanning — phone not reconnecting")
                         logWarn(
                             "[ESCALATION] Pattern B: adapter scanning after prior session " +
                                 "(reconnect attempt $reconnectAttempts)",
@@ -3139,14 +3153,14 @@ class CarlinkManager(
             // Escalate status based on observed patterns
             if (consecutiveNoResponse >= 2) {
                 // Pattern A: adapter USB write dead — retrying won't help
-                setStatusText("Adapter not responding — reboot adapter")
+                setStatusText("Box not responding — reboot box")
                 logWarn("[ESCALATION] Pattern A: $consecutiveNoResponse consecutive no-response errors", tag = Logger.Tags.USB)
             } else if (shortLivedStreamingCount >= SHORT_SESSION_ESCALATION_COUNT) {
                 // Pattern C: sessions keep dying within seconds
-                setStatusText("Connection unstable — reboot adapter")
+                setStatusText("Connection unstable — reboot box")
                 logWarn("[ESCALATION] Pattern C: $shortLivedStreamingCount short-lived sessions", tag = Logger.Tags.USB)
             } else if (isNoResponse) {
-                setStatusText("Adapter not responding — reconnecting...")
+                setStatusText("Box not responding — reconnecting...")
             }
             scheduleReconnect()
         }
@@ -3190,10 +3204,10 @@ class CarlinkManager(
                 tag = Logger.Tags.USB,
             )
             val giveUpMessage = when {
-                consecutiveNoResponse >= 2 -> "Adapter not responding — reboot adapter"
-                shortLivedStreamingCount >= SHORT_SESSION_ESCALATION_COUNT -> "Connection unstable — reboot adapter"
-                hadPriorSession -> "Phone not reconnecting — reboot adapter"
-                else -> "Adapter not responding — unplug and replug adapter"
+                consecutiveNoResponse >= 2 -> "Box not responding — reboot box"
+                shortLivedStreamingCount >= SHORT_SESSION_ESCALATION_COUNT -> "Connection unstable — reboot box"
+                hadPriorSession -> "Phone not reconnecting — reboot box"
+                else -> "Box not responding — unplug and replug box"
             }
             // After give-up: reconnectAttempts is reset to 0, but shortLivedStreamingCount
             // / consecutiveNoResponse are NOT reset. A user who manually taps reconnect

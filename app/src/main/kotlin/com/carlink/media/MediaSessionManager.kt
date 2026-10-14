@@ -1193,7 +1193,7 @@ class MediaSessionManager(
      * to mirror the main-UI status string into the MediaSession so cluster, cardview,
      * and CarMediaApp surfaces show the same user-facing state text the user sees
      * in the app's main UI as the adapter transitions through its lifecycle
-     * (Searching for adapter, Initializing, Waiting for phone, Phone connected,
+     * (Searching for box, Initializing, Waiting for phone, Phone connected,
      * Reconnecting, etc.).
      *
      * Caller is expected to gate on `state != STREAMING` — once real CarPlay/AA

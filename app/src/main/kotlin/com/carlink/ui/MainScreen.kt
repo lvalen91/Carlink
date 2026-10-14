@@ -1,43 +1,19 @@
 package com.carlink.ui
 
 import android.view.MotionEvent
-import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
-import androidx.compose.animation.togetherWith
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredHeight
 import androidx.compose.foundation.layout.requiredWidth
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBars
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.RestartAlt
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -46,53 +22,70 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.IntSize
-import androidx.compose.ui.unit.dp
 import com.carlink.BuildConfig
 import com.carlink.CarlinkManager
-import com.carlink.R
 import com.carlink.logging.logDebug
 import com.carlink.logging.logInfo
 import com.carlink.protocol.MessageSerializer
 import com.carlink.protocol.MultiTouchAction
 import com.carlink.protocol.PhoneType
-import com.carlink.ui.components.LoadingSpinner
 import com.carlink.ui.components.VideoSurface
+import com.carlink.ui.components.VideoSurfaceState
 import com.carlink.ui.components.rememberVideoSurfaceState
 import com.carlink.ui.settings.DisplayMode
-import com.carlink.ui.theme.AutomotiveDimens
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * Main projection screen displaying H.264 video via SurfaceView (HWC overlay) with touch forwarding.
- * Primary video/UI Compose screen; size/branches are the layout + state handling for the surface.
+ * Projection screen: the H.264 video SurfaceView (HWC overlay) plus touch forwarding, and the
+ * place where [CarlinkManager] is initialized against the Surface and started.
+ *
+ * This composable has NO idle presentation of its own any more. Since the dashboard became the
+ * app's base UI (see CarlinkApp in MainActivity.kt), this screen is only ever visible while a
+ * session is STREAMING; whenever it isn't, the dashboard is drawn over it. The former loading
+ * overlay (spinner, status text, Settings / Reset Device buttons) was dead under that model and
+ * was removed — its two actions live on the dashboard (the top-level "Reset Box" button) and the
+ * dashboard IS the settings UI.
+ *
+ * MainScreen must stay composed for the whole life of its [carlinkManager] regardless of
+ * visibility: disposing it destroys the Surface under a running MediaCodec ("BufferQueue has
+ * been abandoned").
+ *
+ * @param onConnectionStateChanged Mirrors every [CarlinkManager.Callback.onStateChanged] to the
+ *   caller, which decides whether this screen is shown. May be invoked off the main thread
+ *   (Compose snapshot-state writes are safe there; see CarlinkManager.setState).
+ * @param onHostUiRequested The phone sent REQUEST_HOST_UI (CarPlay's "car" button / AA's exit to
+ *   host). The caller reveals the dashboard; the session stays alive underneath.
  */
 @Suppress("CyclomaticComplexMethod", "LongMethod")
 @Composable
 fun MainScreen(
     carlinkManager: CarlinkManager,
     displayMode: DisplayMode,
-    onNavigateToSettings: () -> Unit,
-    onResetConnection: (() -> Unit)? = null,
+    onConnectionStateChanged: (CarlinkManager.State) -> Unit = {},
+    onHostUiRequested: () -> Unit = {},
+    // Hoistable so CarlinkApp can PixelCopy the live surface for the dashboard backdrop
+    // (see SurfaceSnapshot.kt). Defaults to a local holder for callers that don't need it.
+    surfaceState: VideoSurfaceState = rememberVideoSurfaceState(),
 ) {
-    val scope = rememberCoroutineScope()
+    // The CarlinkManager.Callback below is built inside a LaunchedEffect and closes over
+    // whatever lambdas were current when the effect (re)launched. Route through
+    // rememberUpdatedState so a caller passing a fresh lambda on recomposition is honoured.
+    val currentOnConnectionStateChanged by rememberUpdatedState(onConnectionStateChanged)
+    val currentOnHostUiRequested by rememberUpdatedState(onHostUiRequested)
+
     // Key state on carlinkManager identity — when manager is replaced (display mode reinit),
     // all session-scoped state resets automatically. This prevents stale callbacks, flags,
     // or touch state from the old manager leaking into the new session.
     var connectionState by remember(carlinkManager) { mutableStateOf(CarlinkManager.State.DISCONNECTED) }
-    var statusText by remember(carlinkManager) { mutableStateOf("Connect Adapter") }
-    var isResetting by remember(carlinkManager) { mutableStateOf(false) }
-    val surfaceState = rememberVideoSurfaceState()
     var isAndroidAuto by remember(carlinkManager) { mutableStateOf(false) }
     var aaCropParams by remember(carlinkManager) { mutableStateOf<CarlinkManager.AaCropParams?>(null) }
 
@@ -152,14 +145,19 @@ fun MainScreen(
                     object : CarlinkManager.Callback {
                         override fun onStateChanged(state: CarlinkManager.State) {
                             connectionState = state
+                            currentOnConnectionStateChanged(state)
                         }
 
                         override fun onStatusTextChanged(text: String) {
-                            statusText = text
+                            // No on-screen consumer since the loading overlay went away (the
+                            // dashboard renders connection state from SessionSnapshot). The
+                            // manager does not log these itself — it only mirrors them into the
+                            // MediaSession placeholder — so keep the trail in the UI log.
+                            logInfo("[UI_STATE] Adapter status: $text", tag = "UI")
                         }
 
                         override fun onHostUIPressed() {
-                            onNavigateToSettings()
+                            currentOnHostUiRequested()
                         }
 
                         override fun onPhoneTypeChanged(phoneType: PhoneType) {
@@ -189,9 +187,6 @@ fun MainScreen(
             }
         }
     }
-
-    val isLoading = connectionState != CarlinkManager.State.STREAMING
-    val colorScheme = MaterialTheme.colorScheme
 
     val baseModifier = Modifier.fillMaxSize().background(Color.Black)
     val boxModifier =
@@ -266,7 +261,7 @@ fun MainScreen(
                 }
 
             // Key the VideoSurface on (manager identity, displayMode) so any reinit
-            // path (display-mode change, resolution change, Reset Connection via the
+            // path (display-mode change, resolution change, dashboard Reset Box via the
             // manager-rebuild path) drops the AndroidView composition slot, disposing
             // the old VideoSurfaceView and releasing its HWC overlay plane. A fresh
             // SurfaceView is then inflated against the current window rect — the only
@@ -323,144 +318,6 @@ fun MainScreen(
                 },
             )
             } // end key(carlinkManager, displayMode)
-        }
-
-        // Loading overlay
-        if (isLoading) {
-            Box(
-                modifier =
-                    Modifier
-                        .fillMaxSize()
-                        .background(colorScheme.scrim.copy(alpha = 0.7f)),
-                contentAlignment = Alignment.Center,
-            ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center,
-                ) {
-                    Image(
-                        painter = painterResource(id = R.drawable.ic_phone_projection),
-                        contentDescription = "Carlink",
-                        modifier = Modifier.height(220.dp),
-                    )
-
-                    Spacer(modifier = Modifier.height(24.dp))
-
-                    LoadingSpinner(
-                        color = colorScheme.primary,
-                    )
-
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    Text(
-                        text = "[ $statusText ]",
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = Color(0xFFDDE4E5), // Fixed light color for dark overlay
-                    )
-                }
-            }
-
-            Row(
-                modifier =
-                    Modifier
-                        .align(Alignment.TopStart)
-                        .windowInsetsPadding(WindowInsets.systemBars)
-                        .windowInsetsPadding(WindowInsets.displayCutout)
-                        .padding(24.dp),
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
-            ) {
-                FilledTonalButton(
-                    onClick = { onNavigateToSettings() },
-                    modifier = Modifier.height(AutomotiveDimens.ButtonMinHeight),
-                    contentPadding =
-                        PaddingValues(
-                            horizontal = AutomotiveDimens.ButtonPaddingHorizontal,
-                            vertical = AutomotiveDimens.ButtonPaddingVertical,
-                        ),
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Settings,
-                        contentDescription = "Settings",
-                        modifier = Modifier.size(AutomotiveDimens.IconSize),
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "Settings",
-                        style = MaterialTheme.typography.titleLarge,
-                        maxLines = 1,
-                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                    )
-                }
-
-                FilledTonalButton(
-                    onClick = {
-                        if (!isResetting) {
-                            isResetting = true
-                            // Prefer the Activity-level manager-rebuild path when wired
-                            // (it recreates the SurfaceView against fresh WindowMetrics and
-                            // renegotiates Open() with current dims — deterministic repair).
-                            // Fall back to in-manager restart() for callers that don't plumb
-                            // the callback (e.g. tests/previews).
-                            val reset = onResetConnection
-                            if (reset != null) {
-                                reset()
-                                // Activity releases the old manager; Compose key(carlinkManager, ...)
-                                // will drop this subtree shortly. Clear the spinner promptly so
-                                // the UI doesn't flash a stale "resetting" state during teardown.
-                                isResetting = false
-                            } else {
-                                scope.launch {
-                                    try {
-                                        carlinkManager.restart()
-                                    } finally {
-                                        isResetting = false
-                                    }
-                                }
-                            }
-                        }
-                    },
-                    enabled = !isResetting,
-                    modifier = Modifier.height(AutomotiveDimens.ButtonMinHeight),
-                    colors =
-                        ButtonDefaults.filledTonalButtonColors(
-                            containerColor = colorScheme.errorContainer,
-                            contentColor = colorScheme.onErrorContainer,
-                        ),
-                    contentPadding =
-                        PaddingValues(
-                            horizontal = AutomotiveDimens.ButtonPaddingHorizontal,
-                            vertical = AutomotiveDimens.ButtonPaddingVertical,
-                        ),
-                ) {
-                    AnimatedContent(
-                        targetState = isResetting,
-                        transitionSpec = {
-                            (fadeIn() + scaleIn()).togetherWith(fadeOut() + scaleOut())
-                        },
-                        label = "resetIconTransition",
-                    ) { resetting ->
-                        if (resetting) {
-                            LoadingSpinner(
-                                size = AutomotiveDimens.IconSize,
-                                color = colorScheme.onErrorContainer,
-                            )
-                        } else {
-                            Icon(
-                                imageVector = Icons.Default.RestartAlt,
-                                contentDescription = "Reset Device",
-                                modifier = Modifier.size(AutomotiveDimens.IconSize),
-                            )
-                        }
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "Reset Device",
-                        style = MaterialTheme.typography.titleLarge,
-                        maxLines = 1,
-                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                    )
-                }
-            }
         }
     }
 }

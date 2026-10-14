@@ -31,7 +31,7 @@ private const val SPINNER_STEP_DEGREES = 360f / SPINNER_STEPS
  *
  * WHY NOT the AnimatedVectorDrawable it replaced: the infinite 1 s rotation animator
  * invalidated the ImageView on EVERY vsync, which produced a 60 fps HWUI + SurfaceFlinger
- * frame of the whole 2400x960 window for as long as the "Searching for adapter" / "Waiting for
+ * frame of the whole 2400x960 window for as long as the "Searching for box" / "Waiting for
  * phone" overlays were up — 30 s to minutes at every ignition, ~10% of a core on gminfo37
  * (measured on the realk emulator, `dumpsys gfxinfo`: 601 frames / 10 s while idle), exactly
  * while GM's own boot-time work is busiest. Stepping a RenderNode property (View.rotation)

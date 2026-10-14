@@ -8,18 +8,20 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import com.carlink.BuildConfig
 
 /**
- * Tabs shown in the Settings screen's navigation rail.
+ * Sections of the Settings experience and their build-flavor visibility.
  *
- * @property title User-facing tab label. NOTE: hardcoded English; not localized.
- * @property icon Material icon rendered alongside [title] in the rail.
+ * HISTORY: these were the tabs of a NavigationRail. The settings UI is now a single adaptive
+ * dashboard (SettingsScreen.kt): PHONES and CONTROL are both part of the dashboard home
+ * page, and LOGS is a secondary page reached from a dashboard button. The enum survives
+ * solely as the owner of the [visible] build-gating rule — the dashboard asks
+ * `SettingsTab.LOGS in SettingsTab.visible` to decide whether to offer the Logs button.
+ *
+ * @property title User-facing label. NOTE: hardcoded English; not localized.
+ * @property icon Material icon for the section.
  *
  * Filtering contract: [visible] is the authoritative list of entries the UI
- * should render; callers must iterate [visible] (not [entries]) so build-flavor
+ * should offer; callers must consult [visible] (not [entries]) so build-flavor
  * gating is honored.
- *
- * Cross-file contract: adding/removing an entry requires updates at
- * SettingsScreen.kt:263-267 (exhaustive `when`), :102 (default `selectedTab`),
- * and :172 (tab rendering loop). Declaration order below is load-bearing.
  */
 enum class SettingsTab(
     val title: String,

@@ -922,3 +922,11 @@
    - This only tells CarPlay to go dark; it no longer flips the app's own theme.
    - Verified live: ENABLE_NIGHT_MODE fired correctly on reaching STREAMING.
    - Affected: MainActivity.kt, ui/theme/Theme.kt, CarlinkManager.kt, ui/MainScreen.kt
+
+[161] :: Dashboard redesign: dashboard-as-base, live box status, section cards, Reset Box/Close App swap, "box" wording.
+   - MainActivity/CarlinkApp: dashboard is now the default screen; video overlays on top only while streaming.
+   - New live status header replaces "Carlink" title: shows box name and connection phase, always current.
+   - Known-devices and control-rail sections now sit in their own background cards, own color scheme.
+   - Close App moved inside App Control; Reset Connection renamed Reset Box, promoted to top-level.
+   - Renamed all user-facing "adapter" text to "box" app-wide; internal identifiers and logs unchanged.
+   Pushed: 14OCT26 12:24AM

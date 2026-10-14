@@ -50,7 +50,7 @@ enum class LogPreset(
         color = Color(0xFFBA68C8), // purple[300]
     ),
     RX_MESSAGES(
-        displayName = "Adapter Messages",
+        displayName = "Box Messages",
         description = "Raw messages (no video/audio)",
         color = Color(0xFF7986CB), // indigo[300]
     ),
