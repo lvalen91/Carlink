@@ -3,7 +3,9 @@ package com.carlink.audio
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.media.AudioDeviceInfo
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.os.Process
@@ -144,10 +146,16 @@ class MicrophoneCaptureManager(
      *        forward the audio downstream — dead in practice.
      *  - 7 = stereo voice (16kHz stereo): same — firmware does not forward stereo mic.
      *
+     * [input]: record from this device instead of the default mic — for phone calls, the car's
+     * processed voice uplink ([findVoiceUplink]).
+     *
      * AudioRecord bring-up with guard-clause early-returns for each failure mode; returns reflect them.
      */
-    @Suppress("LongMethod", "ReturnCount")
-    fun start(decodeType: Int = 5): Boolean {
+    @Suppress("LongMethod", "ReturnCount", "CyclomaticComplexMethod")
+    fun start(
+        decodeType: Int = 5,
+        input: AudioDeviceInfo? = null,
+    ): Boolean {
         synchronized(lock) {
             if (isRunning.get()) {
                 log("[MIC] Already capturing")
@@ -194,6 +202,11 @@ class MicrophoneCaptureManager(
                     return false
                 }
 
+                if (input != null) {
+                    val preferred = audioRecord?.setPreferredDevice(input) ?: false
+                    log("[MIC] Input: ${describe(input)} preferred=$preferred")
+                }
+
                 micBuffer =
                     AudioRingBuffer(
                         capacityMs = bufferCapacityMs,
@@ -210,10 +223,14 @@ class MicrophoneCaptureManager(
                 isRunning.set(true)
                 captureThread = MicCaptureThread(format).also { it.start() }
 
+                val routed = audioRecord?.routedDevice
                 log(
                     "[MIC] Capture started: ${format.sampleRate}Hz ${format.channelCount}ch " +
-                        "buffer=${recordBufferSize}B",
+                        "buffer=${recordBufferSize}B in=${describe(routed)}",
                 )
+                if (input != null && routed != null && routed.id != input.id) {
+                    log("[MIC] WARNING: asked for ${describe(input)} but recording from ${describe(routed)}")
+                }
                 return true
             } catch (e: SecurityException) {
                 log("[MIC] ERROR: Permission denied: ${e.message}")
@@ -352,6 +369,27 @@ class MicrophoneCaptureManager(
 
     private fun log(message: String) {
         logCallback.log("MIC", message)
+    }
+
+    companion object {
+        /**
+         * The car's processed call-mic input, or null when it isn't listed. On GM gminfo3.7 this
+         * is the TYPE_BUS input "Voice_Uplink" (mic_for_vc in the car audio config): the uplink
+         * GM's own CarPlay records calls from, processed by the car's DSP. Test sweeps played on
+         * the call output (bus4_call_out, where our USAGE_VOICE_COMMUNICATION track plays) came
+         * back ~30 dB down on the built-in mic and not at all on this input.
+         */
+        fun findVoiceUplink(am: AudioManager?): AudioDeviceInfo? =
+            am?.getDevices(AudioManager.GET_DEVICES_INPUTS)?.firstOrNull { d ->
+                d.type == AudioDeviceInfo.TYPE_BUS && d.address.lowercase().let { "uplink" in it || "mic_for" in it }
+            }
+
+        private fun describe(d: AudioDeviceInfo?): String =
+            when {
+                d == null -> "default"
+                d.address.isNotEmpty() -> "type${d.type}(${d.address})"
+                else -> "type${d.type}"
+            }
     }
 
     /**

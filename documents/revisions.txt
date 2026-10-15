@@ -930,3 +930,22 @@
    - Close App moved inside App Control; Reset Connection renamed Reset Box, promoted to top-level.
    - Renamed all user-facing "adapter" text to "box" app-wide; internal identifiers and logs unchanged.
    Pushed: 14OCT26 12:24AM
+
+[162] :: Phone calls record from the car's call-mic input (GM Voice_Uplink) instead of the built-in mic; fixes callers hearing echo.
+   - Symptom: on CarPlay calls the far end heard themselves and struggled to hear the driver; fine on the iPhone's
+     own speaker or AirPods, so the car path. Neither the iPhone nor the box's AECM was removing the echo.
+   - Measured on a GM truck (gminfo3.7, Android 12): the built-in mic carried the driver at -48 to -54 dBFS, 22-28 dB
+     above cabin quiet, with or without Android's AEC/NS/AGC, and picked up the call speakers 30-37 dB down,
+     ~640 ms after the far-end audio reached the app (steady over a call). The box's AECM covers only 120-320 ms at
+     its default EchoLatency (320), so that echo went straight to the caller.
+   - The car lists a TYPE_BUS input "Voice_Uplink" (mic_for_vc): the uplink GM's own CarPlay records calls from,
+     echo-cancelled by the car's DSP against bus4_call_out, where our USAGE_VOICE_COMMUNICATION call track plays.
+     Recorded the same way: driver at -22 dBFS, 53-54 dB above quiet, no detectable echo of the call output.
+     Field-tested in the enigy/Carlink2 fork (its v225, which also sends echoDelay=740): call audio far better than
+     any earlier attempt. This port of it compiles and passes the unit tests; not run on hardware itself.
+   - MicrophoneCaptureManager.start(decodeType, input): setPreferredDevice(input) on the AudioRecord; logs the
+     routed device and a WARNING if routing ignored the preference. findVoiceUplink() finds the bus.
+   - CarlinkManager: phone calls record from Voice_Uplink when the car lists it, in MODE_IN_COMMUNICATION (set at
+     PHONECALL_START, restored at PHONECALL_STOP / disconnect / reboot / stop). A Siri-initiated call (mic already
+     open for Siri) restarts on the call input. Siri, and cars without the bus, are unchanged.
+   - Affected: audio/MicrophoneCaptureManager.kt, CarlinkManager.kt, app/build.gradle.kts

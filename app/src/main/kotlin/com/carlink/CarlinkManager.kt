@@ -2,6 +2,8 @@ package com.carlink
 
 import android.content.Context
 import android.hardware.usb.UsbManager
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
 import android.os.PowerManager
 import android.view.Surface
 import androidx.core.content.edit
@@ -452,6 +454,15 @@ class CarlinkManager(
     private var isMicrophoneCapturing = false
     private var currentMicDecodeType = 5 // 16kHz mono
     private var currentMicAudioType = 3 // Siri/voice input
+    private var currentMicInputId: Int? = null // preferred input device id; null = default mic
+
+    // Platform AudioManager (distinct from the DualStreamAudioManager `audioManager` field): finds
+    // the car's call-mic input and holds MODE_IN_COMMUNICATION while a call records from it.
+    private val platformAudioManager = context.getSystemService(AudioManager::class.java)
+
+    // True while WE hold the platform in MODE_IN_COMMUNICATION for a call; gates the restore so we
+    // never leave the device stuck in communication mode after an abnormal call/connection end.
+    @Volatile private var setCommunicationMode = false
     private var lastIncomingDecodeType = 5 // Track adapter's current audio format (from incoming AudioData)
     private var micSendTimer: Timer? = null
 
@@ -1272,6 +1283,7 @@ class CarlinkManager(
         isPhoneCallAudioActive = false
         isAlertAudioActive = false // Reset purpose on disconnect
         stopMicrophoneCapture()
+        restoreNormalAudioMode() // never leave the platform stuck in MODE_IN_COMMUNICATION
 
         // Take the driver/USB device for teardown — or, if start() is mid-setup and owns
         // them, hand the teardown (incl. the reboot request) to start()'s finishSetup.
@@ -1495,6 +1507,7 @@ class CarlinkManager(
         logWarn("[LIFECYCLE] Reboot adapter requested", tag = Logger.Tags.ADAPTR)
         cancelReconnect()
         stopMicrophoneCapture()
+        restoreNormalAudioMode() // never leave the platform stuck in MODE_IN_COMMUNICATION
         // Mid-setup, start() owns the driver: it sends DisconnectPhone+CloseDongle+Reboot
         // (sendGracefulTeardown(reboot = true)) from finishSetup instead of the bare 0xCD here.
         val detached = detachSessionOrDefer(SetupAbort.GRACEFUL_REBOOT)
@@ -2531,6 +2544,9 @@ class CarlinkManager(
                 logInfo("[AUDIO_CMD] Phone call started - enabling microphone (mode: PHONECALL, decodeType=$micDecodeType)", tag = Logger.Tags.MIC)
                 activeVoiceMode = VoiceMode.PHONECALL
                 isPhoneCallAudioActive = true
+                // The car's call uplink is the telephony path: run it in communication mode, as
+                // the car's own phone audio does. Only when the car has one; otherwise unchanged.
+                if (callMicInput() != null) enterCommunicationAudioMode()
                 endPurpose(StreamPurpose.RINGTONE, command) // Call answered — ringtone is over
                 setPurpose(StreamPurpose.PHONE_CALL, command)
                 startMicrophoneCapture(decodeType = micDecodeType, audioType = 3)
@@ -2570,6 +2586,7 @@ class CarlinkManager(
                 logInfo("[AUDIO_CMD] Phone call stopped - disabling microphone", tag = Logger.Tags.MIC)
                 activeVoiceMode = VoiceMode.NONE
                 isPhoneCallAudioActive = false
+                restoreNormalAudioMode()
                 // Pause the phone-call AudioTrack BEFORE abandoning focus so AAOS
                 // sees no active USAGE_VOICE_COMMUNICATION player. Without this,
                 // the silence-write idle path keeps the track PLAYING and AAOS
@@ -2673,18 +2690,21 @@ class CarlinkManager(
         decodeType: Int,
         audioType: Int,
     ) {
+        val input = callMicInput()
         if (isMicrophoneCapturing) {
-            if (currentMicDecodeType == decodeType && currentMicAudioType == audioType) {
+            // The input check moves a Siri-initiated call (mic already open for Siri) onto the call input.
+            if (currentMicDecodeType == decodeType && currentMicAudioType == audioType && currentMicInputId == input?.id) {
                 return
             }
             stopMicrophoneCapture()
         }
 
-        val started = microphoneManager?.start(decodeType) ?: false
+        val started = microphoneManager?.start(decodeType, input) ?: false
         if (started) {
             isMicrophoneCapturing = true
             currentMicDecodeType = decodeType
             currentMicAudioType = audioType
+            currentMicInputId = input?.id
 
             // Start send loop
             // HAZARD: java.util.Timer.scheduleAtFixedRate silently terminates the Timer if
@@ -2710,6 +2730,49 @@ class CarlinkManager(
                 }
 
             logInfo("Microphone capture started", tag = Logger.Tags.MIC)
+        }
+    }
+
+    /**
+     * The input a phone call records from: the car's processed call uplink when it lists one
+     * (GM gminfo3.7: Voice_Uplink, see [MicrophoneCaptureManager.findVoiceUplink]); null = the
+     * default mic, as before. Siri keeps the default mic.
+     *
+     * Measured on a GM truck (gminfo3.7): the built-in mic carried the driver at -48 to -54 dBFS,
+     * 22-28 dB above the cabin's quiet level, with or without Android's AEC/NS/AGC, and picked up
+     * the call speakers 30-37 dB down and ~640 ms late — outside the adapter AECM's default
+     * 120-320 ms window, so callers heard themselves. Voice_Uplink carried the driver at -22 dBFS,
+     * 53-54 dB above quiet, with no detectable echo of the call output.
+     */
+    private fun callMicInput(): AudioDeviceInfo? =
+        if (activeVoiceMode == VoiceMode.PHONECALL) MicrophoneCaptureManager.findVoiceUplink(platformAudioManager) else null
+
+    /**
+     * Put the platform into MODE_IN_COMMUNICATION for a call that records from the car's call
+     * uplink — the mode the car's own phone audio uses, and the one every measurement above was
+     * taken in. Logged because some HALs reject or override it. Undone by [restoreNormalAudioMode].
+     */
+    private fun enterCommunicationAudioMode() {
+        val am = platformAudioManager ?: return
+        try {
+            am.mode = AudioManager.MODE_IN_COMMUNICATION
+            setCommunicationMode = true
+            logInfo("[AUDIO_MODE] setMode(MODE_IN_COMMUNICATION) for phone call — mode now ${am.mode}", tag = Logger.Tags.MIC)
+        } catch (e: Exception) {
+            logWarn("[AUDIO_MODE] setMode(MODE_IN_COMMUNICATION) failed: ${e.message}", tag = Logger.Tags.MIC)
+        }
+    }
+
+    /** Restore MODE_NORMAL after a call — only if we set communication mode. Idempotent. */
+    private fun restoreNormalAudioMode() {
+        if (!setCommunicationMode) return
+        setCommunicationMode = false
+        val am = platformAudioManager ?: return
+        try {
+            am.mode = AudioManager.MODE_NORMAL
+            logInfo("[AUDIO_MODE] setMode(MODE_NORMAL) after phone call — mode now ${am.mode}", tag = Logger.Tags.MIC)
+        } catch (e: Exception) {
+            logWarn("[AUDIO_MODE] setMode(MODE_NORMAL) failed: ${e.message}", tag = Logger.Tags.MIC)
         }
     }
 
@@ -3117,6 +3180,7 @@ class CarlinkManager(
         isPhoneCallAudioActive = false
         isAlertAudioActive = false
         stopMicrophoneCapture()
+        restoreNormalAudioMode() // never leave the platform stuck in MODE_IN_COMMUNICATION
         gnssForwarder?.stop()
 
         // Stop adapter driver (heartbeat, reading loop) and close USB.
