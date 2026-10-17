@@ -51,6 +51,7 @@ import com.carlink.protocol.UnknownMessage
 import com.carlink.protocol.UnpluggedMessage
 import com.carlink.protocol.VideoStreamingSignal
 import com.carlink.ui.settings.AdapterConfigPreference
+import com.carlink.ui.settings.CallMicConfig
 import com.carlink.ui.settings.MicSourceConfig
 import com.carlink.ui.settings.WiFiBandConfig
 import com.carlink.usb.UsbDeviceWrapper
@@ -2705,6 +2706,7 @@ class CarlinkManager(
             currentMicDecodeType = decodeType
             currentMicAudioType = audioType
             currentMicInputId = input?.id
+            if (activeVoiceMode == VoiceMode.PHONECALL) logCallAudio(input)
 
             // Start send loop
             // HAZARD: java.util.Timer.scheduleAtFixedRate silently terminates the Timer if
@@ -2734,9 +2736,14 @@ class CarlinkManager(
     }
 
     /**
-     * The input a phone call records from: the car's processed call uplink when it lists one
-     * (GM gminfo3.7: Voice_Uplink, see [MicrophoneCaptureManager.findVoiceUplink]); null = the
-     * default mic, as before. Siri keeps the default mic.
+     * The input a phone call records from: the car's processed call uplink (GM gminfo3.7:
+     * Voice_Uplink, see [MicrophoneCaptureManager.findVoiceUplink]) when Settings → Call Mic is
+     * "Car call path" and the car lists it; otherwise null = the default path, unchanged (Call Mic
+     * "Automatic", the default). Siri always takes the default path.
+     *
+     * Opt-in because routing differs between GM OS builds and audio calibrations: on some (e.g.
+     * Y181B with current calibration) the default VOICE_COMMUNICATION request already lands on
+     * Voice_Uplink with GM's call echo canceller.
      *
      * Measured on a GM truck (gminfo3.7): the built-in mic carried the driver at -48 to -54 dBFS,
      * 22-28 dB above the cabin's quiet level, with or without Android's AEC/NS/AGC, and picked up
@@ -2744,8 +2751,25 @@ class CarlinkManager(
      * 120-320 ms window, so callers heard themselves. Voice_Uplink carried the driver at -22 dBFS,
      * 53-54 dB above quiet, with no detectable echo of the call output.
      */
-    private fun callMicInput(): AudioDeviceInfo? =
-        if (activeVoiceMode == VoiceMode.PHONECALL) MicrophoneCaptureManager.findVoiceUplink(platformAudioManager) else null
+    private fun callMicInput(): AudioDeviceInfo? {
+        if (activeVoiceMode != VoiceMode.PHONECALL) return null
+        if (AdapterConfigPreference.getInstance(context).getCallMicSync() != CallMicConfig.VOICE_UPLINK) return null
+        return MicrophoneCaptureManager.findVoiceUplink(platformAudioManager)
+    }
+
+    /**
+     * One line per call naming the call audio setup, so logs from different vehicles can be compared
+     * by OS build: the Call Mic choice, the input forced (if any), and whether the car lists the bus.
+     */
+    private fun logCallAudio(input: AudioDeviceInfo?) {
+        val pref = AdapterConfigPreference.getInstance(context).getCallMicSync()
+        val listsUplink = MicrophoneCaptureManager.findVoiceUplink(platformAudioManager) != null
+        logInfo(
+            "[CALL_AUDIO] callMic=$pref input=${input?.let { "bus(${it.address})" } ?: "OS choice + app AEC/NS/AGC"} " +
+                "carListsVoiceUplink=$listsUplink os=${android.os.Build.DISPLAY}",
+            tag = Logger.Tags.MIC,
+        )
+    }
 
     /**
      * Put the platform into MODE_IN_COMMUNICATION for a call that records from the car's call

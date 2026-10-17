@@ -931,7 +931,7 @@
    - Renamed all user-facing "adapter" text to "box" app-wide; internal identifiers and logs unchanged.
    Pushed: 14OCT26 12:24AM
 
-[162] :: Phone calls record from the car's call-mic input (GM Voice_Uplink) instead of the built-in mic; fixes callers hearing echo.
+[162] :: Opt-in Call Mic "Car call path": phone calls can record from the car's call-mic input (GM Voice_Uplink); default unchanged.
    - Symptom: on CarPlay calls the far end heard themselves and struggled to hear the driver; fine on the iPhone's
      own speaker or AirPods, so the car path. Neither the iPhone nor the box's AECM was removing the echo.
    - Measured on a GM truck (gminfo3.7, Android 12): the built-in mic carried the driver at -48 to -54 dBFS, 22-28 dB
@@ -945,7 +945,19 @@
      any earlier attempt. This port of it compiles and passes the unit tests; not run on hardware itself.
    - MicrophoneCaptureManager.start(decodeType, input): setPreferredDevice(input) on the AudioRecord; logs the
      routed device and a WARNING if routing ignored the preference. findVoiceUplink() finds the bus.
-   - CarlinkManager: phone calls record from Voice_Uplink when the car lists it, in MODE_IN_COMMUNICATION (set at
-     PHONECALL_START, restored at PHONECALL_STOP / disconnect / reboot / stop). A Siri-initiated call (mic already
-     open for Siri) restarts on the call input. Siri, and cars without the bus, are unchanged.
-   - Affected: audio/MicrophoneCaptureManager.kt, CarlinkManager.kt, app/build.gradle.kts
+   - Opt-in, per review: routing differs between GM OS builds and audio calibrations. On a 2024 Silverado 2500
+     (OS Y181B, current calibration) the default VOICE_COMMUNICATION request already routes IN_BUILTIN_MIC to HAL
+     path Voice_Uplink with GM's call ECNR and has no echo; on the truck above the same request echoed. So the
+     default forces nothing.
+   - Settings → Adapter → Audio → Call Mic, shown only when Microphone Source is Radio and the car lists the bus:
+     Automatic (default; exactly the previous behavior) / Car call path. App-only: saved without a reinit, read at
+     each call's start.
+   - Car call path: phone calls record from Voice_Uplink in MODE_IN_COMMUNICATION (set at PHONECALL_START, restored
+     at PHONECALL_STOP / disconnect / reboot / stop). A Siri-initiated call restarts on the call input. Siri, and
+     Automatic, are unchanged.
+   - Logs: the file header adds "OS build: <Build.DISPLAY> (id, incremental)"; each call logs one [CALL_AUDIO] line
+     (Call Mic choice, forced input or "OS choice + app AEC/NS/AGC", whether the car lists Voice_Uplink, OS build),
+     so reports from different vehicles can be compared by build.
+   - The box's echo delay is untouched (left to its own web-page setting).
+   - Affected: audio/MicrophoneCaptureManager.kt, CarlinkManager.kt, ui/settings/AdapterConfigPreference.kt,
+     ui/settings/AdapterConfigurationDialog.kt, logging/FileLogManager.kt, app/build.gradle.kts
