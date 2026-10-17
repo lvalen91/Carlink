@@ -199,6 +199,36 @@ enum class HandDriveConfig(
 }
 
 /**
+ * [162] Which input a phone call records from. App-only: the box never sees it, so changing it
+ * needs no reinit; it is read at each call's start.
+ *
+ * Audio routing differs between GM OS builds and audio calibrations, so the default forces nothing.
+ */
+enum class CallMicConfig(
+    val code: String,
+) {
+    /**
+     * Unchanged behavior: VOICE_COMMUNICATION, no input named, Android's AEC/NS/AGC attached; the
+     * OS/HAL pick the device and processing. On builds such as Y181B with current audio calibration
+     * this already lands on the car's Voice_Uplink path with GM's call echo canceller.
+     */
+    AUTOMATIC("automatic"),
+
+    /**
+     * Force GM's Voice_Uplink bus input (no app effects) in MODE_IN_COMMUNICATION — for builds where
+     * Automatic leaves callers hearing echo. Offered only when the car lists the bus.
+     */
+    VOICE_UPLINK("voice_uplink"),
+    ;
+
+    companion object {
+        val DEFAULT = AUTOMATIC
+
+        fun fromCode(code: String?): CallMicConfig = entries.find { it.code == code } ?: DEFAULT
+    }
+}
+
+/**
  * Video resolution configuration for adapter initialization.
  *
  * AUTO uses the detected display resolution (usable area after system UI).
@@ -332,6 +362,9 @@ class AdapterConfigPreference private constructor(
         // Cluster navigation: true = show CarPlay turn-by-turn on instrument cluster
         private val KEY_CLUSTER_NAVIGATION = booleanPreferencesKey("cluster_navigation_enabled")
 
+        // [162] Call mic input: stored as CallMicConfig.code ("automatic", "voice_uplink")
+        private val KEY_CALL_MIC = stringPreferencesKey("call_mic")
+
         // Initialization tracking
         private val KEY_HAS_COMPLETED_FIRST_INIT = booleanPreferencesKey("has_completed_first_init")
         private val KEY_LAST_INIT_VERSION_CODE = longPreferencesKey("last_init_version_code")
@@ -349,6 +382,7 @@ class AdapterConfigPreference private constructor(
         private const val SYNC_CACHE_KEY_HAND_DRIVE = "hand_drive_mode"
         private const val SYNC_CACHE_KEY_GPS_FORWARDING = "gps_forwarding"
         private const val SYNC_CACHE_KEY_CLUSTER_NAVIGATION = "cluster_navigation_enabled"
+        private const val SYNC_CACHE_KEY_CALL_MIC = "call_mic"
         private const val SYNC_CACHE_KEY_HAS_COMPLETED_FIRST_INIT = "has_completed_first_init"
         private const val SYNC_CACHE_KEY_LAST_INIT_VERSION_CODE = "last_init_version_code"
         private const val SYNC_CACHE_KEY_PENDING_CHANGES = "pending_changes"
@@ -734,6 +768,28 @@ class AdapterConfigPreference private constructor(
         }
     }
 
+    /** [162] Call mic input (app-only). */
+    val callMicFlow: Flow<CallMicConfig> =
+        dataStore.data.map { preferences ->
+            CallMicConfig.fromCode(preferences[KEY_CALL_MIC])
+        }
+
+    /** Read at each call's mic start; app-only, so no pending change or reinit. */
+    fun getCallMicSync(): CallMicConfig = CallMicConfig.fromCode(syncCache.getString(SYNC_CACHE_KEY_CALL_MIC, null))
+
+    suspend fun setCallMic(config: CallMicConfig) {
+        try {
+            dataStore.edit { preferences ->
+                preferences[KEY_CALL_MIC] = config.code
+            }
+            syncCache.edit().putString(SYNC_CACHE_KEY_CALL_MIC, config.code).apply()
+            logInfo("Call mic preference saved: $config", tag = "AdapterConfig")
+        } catch (e: IOException) {
+            logError("Failed to save call mic preference: $e", tag = "AdapterConfig")
+            throw e
+        }
+    }
+
     /**
      * Default for the Cluster Integration toggle when the user has NOT made an explicit choice.
      *
@@ -899,6 +955,7 @@ class AdapterConfigPreference private constructor(
                 preferences.remove(KEY_HAND_DRIVE)
                 preferences.remove(KEY_GPS_FORWARDING)
                 preferences.remove(KEY_CLUSTER_NAVIGATION)
+                preferences.remove(KEY_CALL_MIC)
                 preferences.remove(KEY_HAS_COMPLETED_FIRST_INIT)
                 preferences.remove(KEY_LAST_INIT_VERSION_CODE)
                 preferences.remove(KEY_PENDING_CHANGES)
@@ -917,6 +974,7 @@ class AdapterConfigPreference private constructor(
                     remove(SYNC_CACHE_KEY_HAND_DRIVE)
                     remove(SYNC_CACHE_KEY_GPS_FORWARDING)
                     remove(SYNC_CACHE_KEY_CLUSTER_NAVIGATION)
+                    remove(SYNC_CACHE_KEY_CALL_MIC)
                     remove(SYNC_CACHE_KEY_HAS_COMPLETED_FIRST_INIT)
                     remove(SYNC_CACHE_KEY_LAST_INIT_VERSION_CODE)
                     remove(SYNC_CACHE_KEY_PENDING_CHANGES)

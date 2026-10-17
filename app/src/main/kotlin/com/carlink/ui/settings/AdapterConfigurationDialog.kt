@@ -74,6 +74,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.carlink.CarlinkManager
+import com.carlink.audio.MicrophoneCaptureManager
 import com.carlink.logging.logInfo
 import com.carlink.logging.logWarn
 import com.carlink.ui.theme.AutomotiveDimens
@@ -125,6 +126,10 @@ fun AdapterConfigurationDialog(
     val savedMicSource by adapterConfigPreference.micSourceFlow.collectAsStateWithLifecycle(
         initialValue = MicSourceConfig.DEFAULT,
     )
+    // [162] App-only call mic choice, offered only when the car lists the Voice_Uplink bus.
+    val savedCallMic by adapterConfigPreference.callMicFlow.collectAsStateWithLifecycle(
+        initialValue = adapterConfigPreference.getCallMicSync(),
+    )
     val savedWifiBand by adapterConfigPreference.wifiBandFlow.collectAsStateWithLifecycle(
         initialValue = WiFiBandConfig.DEFAULT,
     )
@@ -151,6 +156,12 @@ fun AdapterConfigurationDialog(
     // FULLSCREEN_IMMERSIVE: Use full display bounds (bars are hidden)
     // Other modes: Subtract system bar insets from bounds
     val context = LocalContext.current
+    val hasVoiceUplink =
+        remember {
+            MicrophoneCaptureManager.findVoiceUplink(
+                context.getSystemService(android.media.AudioManager::class.java),
+            ) != null
+        }
     val activity = context as? ComponentActivity
     val (usableWidth, usableHeight) =
         if (activity != null) {
@@ -214,6 +225,7 @@ fun AdapterConfigurationDialog(
     // Local state for editing - allows cancel without saving
     var selectedAudioSource by remember { mutableStateOf(savedAudioSource) }
     var selectedMicSource by remember { mutableStateOf(savedMicSource) }
+    var selectedCallMic by remember { mutableStateOf(savedCallMic) }
     var selectedWifiBand by remember { mutableStateOf(savedWifiBand) }
     var selectedMediaDelay by remember { mutableStateOf(savedMediaDelay) }
     var selectedVideoResolution by remember { mutableStateOf(savedVideoResolution) }
@@ -230,6 +242,7 @@ fun AdapterConfigurationDialog(
     // edits the user has made in the open dialog. Not fixed here; documented only.
     LaunchedEffect(savedAudioSource) { selectedAudioSource = savedAudioSource }
     LaunchedEffect(savedMicSource) { selectedMicSource = savedMicSource }
+    LaunchedEffect(savedCallMic) { selectedCallMic = savedCallMic }
     LaunchedEffect(savedWifiBand) { selectedWifiBand = savedWifiBand }
     LaunchedEffect(savedMediaDelay) { selectedMediaDelay = savedMediaDelay }
     LaunchedEffect(savedVideoResolution) { selectedVideoResolution = savedVideoResolution }
@@ -243,7 +256,7 @@ fun AdapterConfigurationDialog(
     // app restart" — that is no longer true. Apply uses a tiered strategy (see Apply block
     // ~line 828): only Misc changes (GPS/WiFi/ClusterNav) force a Tier-3 app kill; Audio/Visual
     // changes take the Tier-2 in-place reinit path. See also the misleading subtitle at ~line 273.
-    val hasChanges =
+    val adapterChanged =
         selectedAudioSource != savedAudioSource ||
             selectedMicSource != savedMicSource ||
             selectedWifiBand != savedWifiBand ||
@@ -253,6 +266,9 @@ fun AdapterConfigurationDialog(
             selectedHandDrive != savedHandDrive ||
             selectedGpsForwarding != savedGpsForwarding ||
             selectedClusterNavigation != savedClusterNavigation
+
+    // [162] Call Mic is app-only: saving it alone needs no reinit.
+    val hasChanges = adapterChanged || selectedCallMic != savedCallMic
 
     // Responsive dialog width - 60% of container width, clamped between 320dp and 600dp
     val windowInfo = LocalWindowInfo.current
@@ -417,6 +433,47 @@ fun AdapterConfigurationDialog(
                                     style = MaterialTheme.typography.bodySmall,
                                     color = colorScheme.primary,
                                 )
+                            }
+
+                            // [162] Call Mic — which input phone calls record from (app-only).
+                            if (selectedMicSource == MicSourceConfig.APP && hasVoiceUplink) {
+                                ConfigurationOptionCard(
+                                    title = "Call Mic",
+                                    description = "Microphone input used for phone calls",
+                                    icon = Icons.Default.PhoneInTalk,
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                    ) {
+                                        AudioSourceButton(
+                                            label = "Automatic",
+                                            icon = Icons.Default.Mic,
+                                            isSelected = selectedCallMic == CallMicConfig.AUTOMATIC,
+                                            onClick = { selectedCallMic = CallMicConfig.AUTOMATIC },
+                                            modifier = Modifier.weight(1f),
+                                        )
+                                        AudioSourceButton(
+                                            label = "Car call path",
+                                            icon = Icons.Default.DirectionsCar,
+                                            isSelected = selectedCallMic == CallMicConfig.VOICE_UPLINK,
+                                            onClick = { selectedCallMic = CallMicConfig.VOICE_UPLINK },
+                                            modifier = Modifier.weight(1f),
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Text(
+                                        text =
+                                            when (selectedCallMic) {
+                                                CallMicConfig.AUTOMATIC ->
+                                                    "The car and Android pick the mic and echo cancelling (default)"
+                                                CallMicConfig.VOICE_UPLINK ->
+                                                    "Forces the car's call uplink (Voice_Uplink). Try it if callers hear echo"
+                                            },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = colorScheme.primary,
+                                    )
+                                }
                             }
 
                             // Call Quality — UI removed (not the whole feature).
@@ -906,6 +963,7 @@ fun AdapterConfigurationDialog(
                                 "[UI_ACTION] Adapter Config: Apply clicked" +
                                     " - audio=$selectedAudioSource" +
                                     ", mic=$selectedMicSource" +
+                                    ", callMic=$selectedCallMic" +
                                     ", wifi=$selectedWifiBand" +
                                     ", callQuality=1(hardcoded)" +
                                     ", mediaDelay=$selectedMediaDelay" +
@@ -931,8 +989,12 @@ fun AdapterConfigurationDialog(
                                 adapterConfigPreference.setHandDrive(selectedHandDrive)
                                 adapterConfigPreference.setGpsForwarding(selectedGpsForwarding)
                                 adapterConfigPreference.setClusterNavigation(selectedClusterNavigation)
+                                adapterConfigPreference.setCallMic(selectedCallMic)
 
-                                if (miscChanged) {
+                                if (!adapterChanged) {
+                                    // [162] Only the app-only Call Mic changed: saved, no reinit.
+                                    onDismiss()
+                                } else if (miscChanged) {
                                     // Tier 3: Misc settings changed — always kills the app,
                                     // but ONLY GPS changes trigger an adapter reboot (see
                                     // `needsReboot` below). WiFi-band and cluster-nav changes

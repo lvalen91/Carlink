@@ -301,6 +301,8 @@ class FileLogManager internal constructor(
                 appendLine("Started: ${dateFormat.format(Instant.now())}")
                 appendLine("Device: ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}")
                 appendLine("Android: ${android.os.Build.VERSION.RELEASE} (API ${android.os.Build.VERSION.SDK_INT})")
+                // GM OS build (e.g. Y181B): audio routing differs between builds.
+                appendLine("OS build: ${android.os.Build.DISPLAY} (id ${android.os.Build.ID}, incremental ${android.os.Build.VERSION.INCREMENTAL})")
                 appendLine("=".repeat(60))
                 appendLine()
             }
